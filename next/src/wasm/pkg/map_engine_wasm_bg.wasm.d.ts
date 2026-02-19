@@ -11,6 +11,7 @@ export const mapengine_pointer_down: (a: number, b: number, c: number, d: number
 export const mapengine_pointer_move: (a: number, b: number, c: number) => void;
 export const mapengine_pointer_up: (a: number, b: number, c: number) => void;
 export const mapengine_resize: (a: number, b: number, c: number, d: number) => void;
+export const mapengine_set_tile_url_template: (a: number, b: number, c: number) => void;
 export const mapengine_set_view: (a: number, b: number, c: number, d: number) => void;
 export const mapengine_wheel: (a: number, b: number, c: number, d: number, e: number) => void;
 export const wasm_bindgen__closure__destroy__h83ed2f27720389ea: (a: number, b: number) => void;

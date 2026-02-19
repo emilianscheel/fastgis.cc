@@ -80,6 +80,12 @@ export type WorkerInMessage =
   | {
       type: "CLEAR_TRAJECTORY";
       payload: Record<string, never>;
+    }
+  | {
+      type: "SET_TILE_URL_TEMPLATE";
+      payload: {
+        tileUrlTemplate: string;
+      };
     };
 
 export type WorkerOutMessage =

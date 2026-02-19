@@ -13,6 +13,7 @@ export class MapEngine {
     pointer_move(x: number, y: number): void;
     pointer_up(_x: number, _y: number): void;
     resize(width: number, height: number, dpr: number): void;
+    set_tile_url_template(template: string): void;
     set_view(lon: number, lat: number, zoom: number): void;
     wheel(delta_y: number, x: number, y: number, _ctrl_key: boolean): void;
 }
@@ -33,6 +34,7 @@ export interface InitOutput {
     readonly mapengine_pointer_move: (a: number, b: number, c: number) => void;
     readonly mapengine_pointer_up: (a: number, b: number, c: number) => void;
     readonly mapengine_resize: (a: number, b: number, c: number, d: number) => void;
+    readonly mapengine_set_tile_url_template: (a: number, b: number, c: number) => void;
     readonly mapengine_set_view: (a: number, b: number, c: number, d: number) => void;
     readonly mapengine_wheel: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasm_bindgen__closure__destroy__h83ed2f27720389ea: (a: number, b: number) => void;

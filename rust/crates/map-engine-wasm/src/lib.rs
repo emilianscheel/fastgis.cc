@@ -318,7 +318,7 @@ struct EngineState {
     cache_limit: usize,
     tile_cache: HashMap<TileKey, CachedTile>,
     pending_tiles: HashSet<TileKey>,
-    trajectory: Vec<TrajectoryPoint>,
+    trajectories: Vec<Vec<TrajectoryPoint>>,
     high_priority_queue: VecDeque<TileKey>,
     medium_priority_queue: VecDeque<TileKey>,
     low_priority_queue: VecDeque<TileKey>,
@@ -339,6 +339,15 @@ impl EngineState {
 
     fn center_world0(&self) -> (f64, f64) {
         lon_lat_to_world(self.center_lon, self.center_lat, 0, self.tile_size)
+    }
+
+    fn trajectories_bounds(&self) -> Option<Bounds> {
+        let all_points: Vec<TrajectoryPoint> = self
+            .trajectories
+            .iter()
+            .flat_map(|route| route.iter().cloned())
+            .collect();
+        trajectory_bounds(&all_points)
     }
 
     fn color_css(rgb: [f64; 3]) -> String {
@@ -692,47 +701,54 @@ impl EngineState {
     }
 
     fn draw_trajectory(&self) {
-        if self.trajectory.is_empty() {
+        if self.trajectories.is_empty() {
             return;
         }
 
         let display_scale = Self::zoom_scale(self.zoom);
         let (center_world0_x, center_world0_y) = self.center_world0();
 
-        self.ctx.set_stroke_style_str("#ff7a18");
-        self.ctx.set_line_width(2.0);
-        self.ctx.begin_path();
-
-        for (idx, point) in self.trajectory.iter().enumerate() {
-            let (world0_x, world0_y) = lon_lat_to_world(point.lon, point.lat, 0, self.tile_size);
-            let sx = (world0_x - center_world0_x) * display_scale + self.width / 2.0;
-            let sy = (world0_y - center_world0_y) * display_scale + self.height / 2.0;
-
-            if idx == 0 {
-                self.ctx.move_to(sx, sy);
-            } else {
-                self.ctx.line_to(sx, sy);
+        for route in &self.trajectories {
+            if route.is_empty() {
+                continue;
             }
-        }
-        self.ctx.stroke();
 
-        if let Some(first) = self.trajectory.first() {
-            self.draw_marker(
-                first,
-                "#2ecc71",
-                center_world0_x,
-                center_world0_y,
-                display_scale,
-            );
-        }
-        if let Some(last) = self.trajectory.last() {
-            self.draw_marker(
-                last,
-                "#e74c3c",
-                center_world0_x,
-                center_world0_y,
-                display_scale,
-            );
+            self.ctx.set_stroke_style_str("#ff7a18");
+            self.ctx.set_line_width(2.0);
+            self.ctx.begin_path();
+
+            for (idx, point) in route.iter().enumerate() {
+                let (world0_x, world0_y) =
+                    lon_lat_to_world(point.lon, point.lat, 0, self.tile_size);
+                let sx = (world0_x - center_world0_x) * display_scale + self.width / 2.0;
+                let sy = (world0_y - center_world0_y) * display_scale + self.height / 2.0;
+
+                if idx == 0 {
+                    self.ctx.move_to(sx, sy);
+                } else {
+                    self.ctx.line_to(sx, sy);
+                }
+            }
+            self.ctx.stroke();
+
+            if let Some(first) = route.first() {
+                self.draw_marker(
+                    first,
+                    "#2ecc71",
+                    center_world0_x,
+                    center_world0_y,
+                    display_scale,
+                );
+            }
+            if let Some(last) = route.last() {
+                self.draw_marker(
+                    last,
+                    "#e74c3c",
+                    center_world0_x,
+                    center_world0_y,
+                    display_scale,
+                );
+            }
         }
     }
 
@@ -791,6 +807,18 @@ impl EngineState {
             .replace("{z}", &key.z.to_string())
             .replace("{x}", &key.x.to_string())
             .replace("{y}", &key.y.to_string())
+    }
+
+    fn set_tile_url_template(&mut self, template: String) {
+        self.tile_url_template = template;
+        self.pending_tiles.clear();
+        self.high_priority_queue.clear();
+        self.medium_priority_queue.clear();
+        self.low_priority_queue.clear();
+        self.in_flight_requests = 0;
+        self.tile_cache.clear();
+        self.top_void_color_rgb = None;
+        self.bottom_void_color_rgb = None;
     }
 
     fn insert_tile(
@@ -871,7 +899,7 @@ pub fn init_engine(canvas_or_offscreen: JsValue, config: JsValue) -> Result<MapE
         cache_limit,
         tile_cache: HashMap::new(),
         pending_tiles: HashSet::new(),
-        trajectory: Vec::new(),
+        trajectories: Vec::new(),
         high_priority_queue: VecDeque::new(),
         medium_priority_queue: VecDeque::new(),
         low_priority_queue: VecDeque::new(),
@@ -915,6 +943,7 @@ fn make_canvas_surface(
 
 fn request_tile(state: Rc<RefCell<EngineState>>, key: TileKey, url: String) {
     spawn_local(async move {
+        let request_url = url.clone();
         let result = fetch_tile_bitmap(url)
             .await
             .and_then(|value| value.dyn_into::<ImageBitmap>().map_err(Into::into));
@@ -933,8 +962,13 @@ fn request_tile(state: Rc<RefCell<EngineState>>, key: TileKey, url: String) {
             state_mut.pending_tiles.remove(&key);
             state_mut.in_flight_requests = state_mut.in_flight_requests.saturating_sub(1);
 
-            if let Ok(bitmap) = result {
-                state_mut.insert_tile(key, bitmap, edge_sample);
+            let is_current_source = state_mut.tile_url(key) == request_url;
+            if is_current_source {
+                if let Ok(bitmap) = result {
+                    state_mut.insert_tile(key, bitmap, edge_sample);
+                }
+            } else if result.is_ok() {
+                // Drop stale tile responses after style switches.
             }
         }
 
@@ -1068,11 +1102,13 @@ impl MapEngine {
             String::from_utf8(bytes).map_err(|_| JsValue::from_str("CSV must be valid UTF-8"))?;
         let parsed = parse_trajectory_csv(&content);
 
-        let bounds = trajectory_bounds(&parsed.points);
+        let loaded_bounds = trajectory_bounds(&parsed.points);
         {
             let mut state = self.state.borrow_mut();
-            state.trajectory = parsed.points;
-            if let Some(b) = bounds {
+            if !parsed.points.is_empty() {
+                state.trajectories.push(parsed.points);
+            }
+            if let Some(b) = state.trajectories_bounds() {
                 state.fit_to_bounds(b);
             }
         }
@@ -1080,14 +1116,18 @@ impl MapEngine {
         let result = CsvLoadResult {
             valid_rows: parsed.valid_rows,
             invalid_rows: parsed.invalid_rows,
-            bounds,
+            bounds: loaded_bounds,
         };
 
         serde_wasm_bindgen::to_value(&result).map_err(Into::into)
     }
 
     pub fn clear_trajectory(&mut self) {
-        self.state.borrow_mut().trajectory.clear();
+        self.state.borrow_mut().trajectories.clear();
+    }
+
+    pub fn set_tile_url_template(&mut self, template: String) {
+        self.state.borrow_mut().set_tile_url_template(template);
     }
 
     pub fn destroy(&mut self) {
@@ -1100,7 +1140,7 @@ impl MapEngine {
         state.tile_cache.clear();
         state.top_void_color_rgb = None;
         state.bottom_void_color_rgb = None;
-        state.trajectory.clear();
+        state.trajectories.clear();
         state.dragging = None;
     }
 }

@@ -12,6 +12,7 @@ type WasmMapEngine = {
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
   clear_trajectory(): void;
+  set_tile_url_template(template: string): void;
   destroy(): void;
 };
 
@@ -148,6 +149,11 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
 
   if (message.type === "CLEAR_TRAJECTORY") {
     engine.clear_trajectory();
+    return;
+  }
+
+  if (message.type === "SET_TILE_URL_TEMPLATE") {
+    engine.set_tile_url_template(message.payload.tileUrlTemplate);
   }
 }
 

@@ -77,7 +77,7 @@ export function CsvDropOverlay({ enabled, onDropFiles }: CsvDropOverlayProps) {
   if (!isDragOverPage) return null;
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-white/98 backdrop-blur-sm">
+    <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-white/95">
       <div className="flex flex-col items-center gap-4">
         <Upload className="h-11 w-11 text-neutral-500" aria-hidden="true" />
         <p className="text-2xl font-medium text-neutral-500">Drop any file here to view it on the map</p>

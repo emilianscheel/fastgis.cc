@@ -75,6 +75,14 @@ export class MapEngine {
         wasm.mapengine_resize(this.__wbg_ptr, width, height, dpr);
     }
     /**
+     * @param {string} template
+     */
+    set_tile_url_template(template) {
+        const ptr0 = passStringToWasm0(template, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.mapengine_set_tile_url_template(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * @param {number} lon
      * @param {number} lat
      * @param {number} zoom

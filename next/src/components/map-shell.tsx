@@ -1,10 +1,18 @@
 "use client";
 
 import type * as React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Minus, Plus } from "lucide-react";
 
 import { CsvDropOverlay } from "@/components/csv-drop-overlay";
+import {
+  Menubar,
+  MenubarContent,
+  MenubarMenu,
+  MenubarRadioGroup,
+  MenubarRadioItem,
+  MenubarTrigger
+} from "@/components/ui/menubar";
 import { Button } from "@/components/ui/button";
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
 import type { InitConfig, WorkerInMessage, WorkerOutMessage } from "@/lib/map-protocol";
@@ -19,14 +27,38 @@ type MainThreadEngine = {
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): unknown;
   clear_trajectory(): void;
+  set_tile_url_template(template: string): void;
   destroy(): void;
 };
 
 type RuntimeMode = "none" | "worker" | "main";
 type Status = "loading" | "ready" | "error";
 
-const MAP_CONFIG: InitConfig = {
-  tileUrlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+type MapStyle = {
+  id: string;
+  label: string;
+  tileUrlTemplate: string;
+};
+
+const MAP_STYLES: MapStyle[] = [
+  {
+    id: "osm-standard",
+    label: "OSM Standard",
+    tileUrlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+  },
+  {
+    id: "carto-light",
+    label: "Carto Light",
+    tileUrlTemplate: "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+  },
+  {
+    id: "carto-dark",
+    label: "Carto Dark",
+    tileUrlTemplate: "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+  }
+];
+
+const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
   minZoom: 0,
   maxZoom: 19,
   tileSize: 256,
@@ -45,8 +77,17 @@ export function MapShell() {
 
   const [status, setStatus] = useState<Status>("loading");
   const [canvasInstance, setCanvasInstance] = useState(0);
+  const [mapStyleId, setMapStyleId] = useState<MapStyle["id"]>("osm-standard");
+  const tileUrlTemplateRef = useRef(MAP_STYLES[0].tileUrlTemplate);
 
   const canInteract = status === "ready";
+  const selectedMapStyle = useMemo(
+    () => MAP_STYLES.find((style) => style.id === mapStyleId) ?? MAP_STYLES[0],
+    [mapStyleId]
+  );
+  useEffect(() => {
+    tileUrlTemplateRef.current = selectedMapStyle.tileUrlTemplate;
+  }, [selectedMapStyle]);
 
   const viewportSize = useCallback(() => {
     const stage = stageRef.current;
@@ -168,9 +209,13 @@ export function MapShell() {
         throw new Error("Map canvas is not mounted.");
       }
 
+      const initConfig: InitConfig = {
+        ...BASE_MAP_CONFIG,
+        tileUrlTemplate: tileUrlTemplateRef.current
+      };
       const wasmModule = await import("@/wasm/pkg/map_engine_wasm.js");
       await wasmModule.default();
-      const engine = wasmModule.init_engine(canvas, MAP_CONFIG) as MainThreadEngine;
+      const engine = wasmModule.init_engine(canvas, initConfig) as MainThreadEngine;
       const { width, height } = viewportSize();
       engine.resize(width, height, window.devicePixelRatio || 1);
       engine.set_view(0, 20, 2);
@@ -272,7 +317,10 @@ export function MapShell() {
               height,
               dpr: window.devicePixelRatio || 1,
               origin: window.location.origin,
-              config: MAP_CONFIG
+              config: {
+                ...BASE_MAP_CONFIG,
+                tileUrlTemplate: tileUrlTemplateRef.current
+              }
             }
           };
           worker.postMessage(message, [offscreen]);
@@ -280,7 +328,8 @@ export function MapShell() {
           runtimeModeRef.current = "worker";
         } catch {
           if (!cancelled) {
-            await initMainThreadEngine();
+            // Offscreen transfer may already have happened; remount a fresh canvas for fallback init.
+            await initMainThreadEngine({ forceFreshCanvas: true });
           }
         }
       } else {
@@ -411,6 +460,21 @@ export function MapShell() {
   });
 
   useEffect(() => {
+    if (!canInteract) return;
+
+    const tileUrlTemplate = selectedMapStyle.tileUrlTemplate;
+    if (runtimeModeRef.current === "worker") {
+      sendToWorker({
+        type: "SET_TILE_URL_TEMPLATE",
+        payload: { tileUrlTemplate }
+      });
+      return;
+    }
+
+    mainEngineRef.current?.set_tile_url_template(tileUrlTemplate);
+  }, [canInteract, selectedMapStyle, sendToWorker]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -458,6 +522,20 @@ export function MapShell() {
         <div className="pointer-events-auto flex w-full items-center justify-between border-b border-black/15 bg-white/80 px-4 py-2 backdrop-blur-md">
           <div />
           <div className="flex items-center gap-2">
+            <Menubar className="h-9 rounded-none bg-white p-0">
+              <MenubarMenu>
+                <MenubarTrigger className="h-9 rounded-none px-3 text-black">Style</MenubarTrigger>
+                <MenubarContent align="end" className="rounded-none">
+                  <MenubarRadioGroup value={mapStyleId} onValueChange={(value) => setMapStyleId(value)}>
+                    {MAP_STYLES.map((style) => (
+                      <MenubarRadioItem key={style.id} value={style.id} className="rounded-none">
+                        {style.label}
+                      </MenubarRadioItem>
+                    ))}
+                  </MenubarRadioGroup>
+                </MenubarContent>
+              </MenubarMenu>
+            </Menubar>
             <Button
               type="button"
               variant="outline"
