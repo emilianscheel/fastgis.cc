@@ -3,6 +3,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Minus, Plus } from "lucide-react";
+import { useTheme } from "next-themes";
 
 import { CsvDropOverlay } from "@/components/csv-drop-overlay";
 import {
@@ -40,6 +41,9 @@ type MapStyle = {
   tileUrlTemplate: string;
 };
 
+const LIGHT_THEME_MAP_STYLE_ID = "carto-light";
+const DARK_THEME_MAP_STYLE_ID = "carto-dark";
+
 const MAP_STYLES: MapStyle[] = [
   {
     id: "osm-fr-hot",
@@ -65,7 +69,16 @@ const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
   cacheSize: 2048
 };
 
+function mapStyleForTheme(theme?: string): MapStyle["id"] {
+  return theme === "dark" ? DARK_THEME_MAP_STYLE_ID : LIGHT_THEME_MAP_STYLE_ID;
+}
+
+function getMapStyleById(id: MapStyle["id"]): MapStyle {
+  return MAP_STYLES.find((style) => style.id === id) ?? MAP_STYLES[0];
+}
+
 export function MapShell() {
+  const { resolvedTheme } = useTheme();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -77,18 +90,36 @@ export function MapShell() {
 
   const [status, setStatus] = useState<Status>("loading");
   const [canvasInstance, setCanvasInstance] = useState(0);
-  const [mapStyleId, setMapStyleId] = useState<MapStyle["id"]>("osm-fr-hot");
-  const tileUrlTemplateRef = useRef(MAP_STYLES[0].tileUrlTemplate);
-  const activeTileTemplateRef = useRef(MAP_STYLES[0].tileUrlTemplate);
+  const [isMounted, setIsMounted] = useState(false);
+  const [mapStyleId, setMapStyleId] = useState<MapStyle["id"]>(LIGHT_THEME_MAP_STYLE_ID);
+  const tileUrlTemplateRef = useRef(getMapStyleById(mapStyleId).tileUrlTemplate);
+  const activeTileTemplateRef = useRef(getMapStyleById(mapStyleId).tileUrlTemplate);
 
   const canInteract = status === "ready";
-  const selectedMapStyle = useMemo(
-    () => MAP_STYLES.find((style) => style.id === mapStyleId) ?? MAP_STYLES[0],
-    [mapStyleId]
-  );
+  const selectedMapStyle = useMemo(() => getMapStyleById(mapStyleId), [mapStyleId]);
   useEffect(() => {
     tileUrlTemplateRef.current = selectedMapStyle.tileUrlTemplate;
   }, [selectedMapStyle]);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isMounted || !resolvedTheme) {
+      return;
+    }
+
+    const themeDrivenMapStyleId = mapStyleForTheme(resolvedTheme);
+    setMapStyleId((currentStyleId) => {
+      const isThemeCartoStyle =
+        currentStyleId === LIGHT_THEME_MAP_STYLE_ID || currentStyleId === DARK_THEME_MAP_STYLE_ID;
+      if (!isThemeCartoStyle || currentStyleId === themeDrivenMapStyleId) {
+        return currentStyleId;
+      }
+      return themeDrivenMapStyleId;
+    });
+  }, [isMounted, resolvedTheme]);
 
   const viewportSize = useCallback(() => {
     const stage = stageRef.current;
@@ -499,8 +530,14 @@ export function MapShell() {
     };
   }, [applyWheel, canvasInstance]);
 
+  const handleMapStyleChange = useCallback((value: string) => {
+    const nextStyle = MAP_STYLES.find((style) => style.id === value);
+    if (!nextStyle) return;
+    setMapStyleId(nextStyle.id);
+  }, []);
+
   return (
-    <main className="fixed inset-0 h-screen w-screen overflow-hidden bg-black">
+    <main className="fixed inset-0 h-screen w-screen overflow-hidden bg-background">
       <div ref={stageRef} className="absolute inset-0">
         <canvas
           key={canvasInstance}
@@ -526,28 +563,34 @@ export function MapShell() {
       <CsvDropOverlay enabled={canInteract} onDropFiles={handleDroppedFiles} />
 
       <div className="pointer-events-none fixed inset-x-0 top-0 z-20">
-        <div className="pointer-events-auto flex w-full items-center justify-between border-b border-black/15 bg-white/80 px-4 py-2 backdrop-blur-md">
+        <div className="pointer-events-auto flex w-full items-center justify-between border-b border-border/80 bg-background/85 px-4 py-2 text-foreground backdrop-blur-md">
           <div />
           <div className="flex items-center gap-2">
-            <Menubar className="h-9 rounded-none bg-white p-0">
-              <MenubarMenu>
-                <MenubarTrigger className="h-9 rounded-none px-3 text-black">Style</MenubarTrigger>
-                <MenubarContent align="end" className="rounded-none">
-                  <MenubarRadioGroup value={mapStyleId} onValueChange={(value) => setMapStyleId(value)}>
-                    {MAP_STYLES.map((style) => (
-                      <MenubarRadioItem key={style.id} value={style.id} className="rounded-none">
-                        {style.label}
-                      </MenubarRadioItem>
-                    ))}
-                  </MenubarRadioGroup>
-                </MenubarContent>
-              </MenubarMenu>
-            </Menubar>
+            {isMounted ? (
+              <Menubar className="h-9 rounded-none border-border/80 bg-background p-0">
+                <MenubarMenu>
+                  <MenubarTrigger className="h-9 rounded-none px-3 text-foreground">Style</MenubarTrigger>
+                  <MenubarContent align="end" className="rounded-none">
+                    <MenubarRadioGroup value={mapStyleId} onValueChange={handleMapStyleChange}>
+                      {MAP_STYLES.map((style) => (
+                        <MenubarRadioItem key={style.id} value={style.id} className="rounded-none">
+                          {style.label}
+                        </MenubarRadioItem>
+                      ))}
+                    </MenubarRadioGroup>
+                  </MenubarContent>
+                </MenubarMenu>
+              </Menubar>
+            ) : (
+              <div className="flex h-9 items-center border border-border/80 bg-background px-3 text-sm font-medium text-foreground">
+                Style
+              </div>
+            )}
             <Button
               type="button"
               variant="outline"
               size="sm"
-              className="h-9 w-9 rounded-none border-black/20 bg-white p-0 text-black hover:bg-black/[0.04]"
+              className="h-9 w-9 rounded-none border-border/80 bg-background p-0 text-foreground hover:bg-muted/60"
               onClick={handleZoomIn}
               disabled={!canInteract}
               aria-label="Zoom in"
@@ -558,7 +601,7 @@ export function MapShell() {
               type="button"
               variant="outline"
               size="sm"
-              className="h-9 w-9 rounded-none border-black/20 bg-white p-0 text-black hover:bg-black/[0.04]"
+              className="h-9 w-9 rounded-none border-border/80 bg-background p-0 text-foreground hover:bg-muted/60"
               onClick={handleZoomOut}
               disabled={!canInteract}
               aria-label="Zoom out"

@@ -12,7 +12,7 @@ const Menubar = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <MenubarPrimitive.Root
     ref={ref}
-    className={cn("flex h-10 items-center space-x-1 border border-black/20 bg-white p-1", className)}
+    className={cn("flex h-10 items-center space-x-1 border border-border bg-background p-1", className)}
     {...props}
   />
 ));
@@ -56,7 +56,7 @@ const MenubarSubContent = React.forwardRef<
   <MenubarPrimitive.SubContent
     ref={ref}
     className={cn(
-      "z-50 min-w-[8rem] overflow-hidden border border-black/15 bg-white p-1 text-foreground shadow-md",
+      "z-50 min-w-[8rem] overflow-hidden border border-border bg-background p-1 text-foreground shadow-md",
       className
     )}
     {...props}
@@ -90,7 +90,7 @@ const MenubarContent = React.forwardRef<
       alignOffset={alignOffset}
       sideOffset={sideOffset}
       className={cn(
-        "z-50 min-w-[12rem] overflow-hidden border border-black/15 bg-white p-1 text-foreground shadow-md",
+        "z-50 min-w-[12rem] overflow-hidden border border-border bg-background p-1 text-foreground shadow-md",
         className
       )}
       {...props}
