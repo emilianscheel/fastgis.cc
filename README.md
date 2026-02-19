@@ -1,4 +1,4 @@
-# qgis-rust
+# `fastgis.cc`
 
 Monorepo-lite structure (no Turborepo/Nx):
 
@@ -22,4 +22,3 @@ Monorepo-lite structure (no Turborepo/Nx):
 - Rendering happens in Rust/WASM through `wasm-bindgen`.
 - React/Next is only the UI shell and event forwarding layer.
 - Worker + OffscreenCanvas is the primary path to keep UI responsive.
-
