@@ -6,6 +6,7 @@ export const init_engine: (a: any, b: any) => [number, number, number];
 export const mapengine_clear_trajectory: (a: number) => void;
 export const mapengine_destroy: (a: number) => void;
 export const mapengine_frame: (a: number, b: number) => void;
+export const mapengine_hit_test_marker: (a: number, b: number, c: number) => [number, number, number];
 export const mapengine_load_trajectory_csv: (a: number, b: number, c: number) => [number, number, number];
 export const mapengine_place_marker: (a: number, b: number, c: number) => void;
 export const mapengine_pointer_down: (a: number, b: number, c: number, d: number) => void;

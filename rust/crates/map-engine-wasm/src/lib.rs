@@ -25,6 +25,13 @@ const VOID_COLOR_BLEND_ALPHA: f64 = 0.25;
 const BOX_ZOOM_FIT_PADDING: f64 = 0.9;
 const TRAJECTORY_FIT_PADDING: f64 = 0.8;
 const VIEW_ANIMATION_DURATION_MS: f64 = 300.0;
+const LOCATION_MARKER_HEAD_RADIUS_PX: f64 = 8.0;
+const LOCATION_MARKER_HEAD_CENTER_OFFSET_Y_PX: f64 = 12.0;
+const LOCATION_MARKER_TAIL_HALF_WIDTH_PX: f64 = 5.0;
+const LOCATION_MARKER_INNER_DOT_RADIUS_PX: f64 = 3.0;
+const LOCATION_MARKER_TOOLTIP_OFFSET_Y_PX: f64 = 6.0;
+const LOCATION_MARKER_FILL_COLOR: &str = "#f97316";
+const LOCATION_MARKER_INNER_DOT_COLOR: &str = "#fff7ed";
 
 #[wasm_bindgen(inline_js = r#"
 export async function fetchTileBitmap(url) {
@@ -165,6 +172,15 @@ struct CsvLoadResult {
     valid_rows: usize,
     invalid_rows: usize,
     bounds: Option<Bounds>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarkerHover {
+    lon: f64,
+    lat: f64,
+    screen_x: f64,
+    screen_y: f64,
 }
 
 enum CanvasSurface {
@@ -342,7 +358,7 @@ struct EngineState {
     tile_cache: HashMap<TileKey, CachedTile>,
     pending_tiles: HashSet<TileKey>,
     trajectories: Vec<Vec<TrajectoryPoint>>,
-    location_marker: Option<LocationMarker>,
+    location_markers: Vec<LocationMarker>,
     high_priority_queue: VecDeque<TileKey>,
     medium_priority_queue: VecDeque<TileKey>,
     low_priority_queue: VecDeque<TileKey>,
@@ -856,7 +872,7 @@ impl EngineState {
         let (marker_lon, marker_lat) =
             world_to_lon_lat(marker_world0_x, marker_world0_y, 0, self.tile_size);
 
-        self.location_marker = Some(LocationMarker {
+        self.location_markers.push(LocationMarker {
             lon: normalize_lon(marker_lon),
             lat: clamp_lat(marker_lat),
         });
@@ -893,7 +909,7 @@ impl EngineState {
         }
 
         self.draw_trajectory();
-        self.draw_location_marker();
+        self.draw_location_markers();
     }
 
     fn draw_trajectory(&self) {
@@ -966,32 +982,114 @@ impl EngineState {
         self.ctx.fill();
     }
 
-    fn draw_location_marker(&self) {
-        let Some(marker) = self.location_marker else {
-            return;
-        };
-
+    fn marker_tip_screen_position(&self, marker: LocationMarker) -> (f64, f64) {
         let display_scale = Self::zoom_scale(self.zoom);
         let (center_world0_x, center_world0_y) = self.center_world0();
         let (marker_world0_x, marker_world0_y) =
             lon_lat_to_world(marker.lon, marker.lat, 0, self.tile_size);
         let tip_x = (marker_world0_x - center_world0_x) * display_scale + self.width / 2.0;
         let tip_y = (marker_world0_y - center_world0_y) * display_scale + self.height / 2.0;
+        (tip_x, tip_y)
+    }
 
-        const HEAD_RADIUS_PX: f64 = 8.0;
-        const HEAD_CENTER_OFFSET_Y_PX: f64 = 12.0;
-        const TAIL_HALF_WIDTH_PX: f64 = 5.0;
+    fn marker_head_center_from_tip(tip_x: f64, tip_y: f64) -> (f64, f64) {
+        (tip_x, tip_y - LOCATION_MARKER_HEAD_CENTER_OFFSET_Y_PX)
+    }
 
-        let head_center_x = tip_x;
-        let head_center_y = tip_y - HEAD_CENTER_OFFSET_Y_PX;
-        let tail_top_y = head_center_y + HEAD_RADIUS_PX - 1.0;
+    fn marker_tail_top_y(head_center_y: f64) -> f64 {
+        head_center_y + LOCATION_MARKER_HEAD_RADIUS_PX - 1.0
+    }
 
-        self.ctx.set_fill_style_str("#f97316");
+    fn triangle_sign(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+        (px - bx) * (ay - by) - (ax - bx) * (py - by)
+    }
+
+    fn point_in_triangle(
+        px: f64,
+        py: f64,
+        ax: f64,
+        ay: f64,
+        bx: f64,
+        by: f64,
+        cx: f64,
+        cy: f64,
+    ) -> bool {
+        let d1 = Self::triangle_sign(px, py, ax, ay, bx, by);
+        let d2 = Self::triangle_sign(px, py, bx, by, cx, cy);
+        let d3 = Self::triangle_sign(px, py, cx, cy, ax, ay);
+        let has_negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let has_positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        !(has_negative && has_positive)
+    }
+
+    fn marker_contains_pointer(tip_x: f64, tip_y: f64, pointer_x: f64, pointer_y: f64) -> bool {
+        let (head_center_x, head_center_y) = Self::marker_head_center_from_tip(tip_x, tip_y);
+        let dx = pointer_x - head_center_x;
+        let dy = pointer_y - head_center_y;
+        let in_head = dx * dx + dy * dy <= LOCATION_MARKER_HEAD_RADIUS_PX * LOCATION_MARKER_HEAD_RADIUS_PX;
+        if in_head {
+            return true;
+        }
+
+        let tail_top_y = Self::marker_tail_top_y(head_center_y);
+        Self::point_in_triangle(
+            pointer_x,
+            pointer_y,
+            tip_x,
+            tip_y,
+            tip_x - LOCATION_MARKER_TAIL_HALF_WIDTH_PX,
+            tail_top_y,
+            tip_x + LOCATION_MARKER_TAIL_HALF_WIDTH_PX,
+            tail_top_y,
+        )
+    }
+
+    fn hit_test_marker_at_screen(&self, x: f64, y: f64) -> Option<MarkerHover> {
+        if x < 0.0 || y < 0.0 || x > self.width || y > self.height {
+            return None;
+        }
+
+        for marker in self.location_markers.iter().rev() {
+            let (tip_x, tip_y) = self.marker_tip_screen_position(*marker);
+            if !Self::marker_contains_pointer(tip_x, tip_y, x, y) {
+                continue;
+            }
+
+            let (head_center_x, head_center_y) = Self::marker_head_center_from_tip(tip_x, tip_y);
+            return Some(MarkerHover {
+                lon: marker.lon,
+                lat: marker.lat,
+                screen_x: head_center_x,
+                screen_y: head_center_y
+                    - LOCATION_MARKER_HEAD_RADIUS_PX
+                    - LOCATION_MARKER_TOOLTIP_OFFSET_Y_PX,
+            });
+        }
+
+        None
+    }
+
+    fn draw_location_markers(&self) {
+        if self.location_markers.is_empty() {
+            return;
+        }
+
+        for marker in &self.location_markers {
+            self.draw_location_marker(*marker);
+        }
+    }
+
+    fn draw_location_marker(&self, marker: LocationMarker) {
+        let (tip_x, tip_y) = self.marker_tip_screen_position(marker);
+        let (head_center_x, head_center_y) = Self::marker_head_center_from_tip(tip_x, tip_y);
+        let tail_top_y = Self::marker_tail_top_y(head_center_y);
+
+        self.ctx.set_fill_style_str(LOCATION_MARKER_FILL_COLOR);
         self.ctx.begin_path();
         let _ = self.ctx.arc(
             head_center_x,
             head_center_y,
-            HEAD_RADIUS_PX,
+            LOCATION_MARKER_HEAD_RADIUS_PX,
             0.0,
             std::f64::consts::PI * 2.0,
         );
@@ -999,16 +1097,18 @@ impl EngineState {
 
         self.ctx.begin_path();
         self.ctx.move_to(tip_x, tip_y);
-        self.ctx.line_to(tip_x - TAIL_HALF_WIDTH_PX, tail_top_y);
-        self.ctx.line_to(tip_x + TAIL_HALF_WIDTH_PX, tail_top_y);
+        self.ctx
+            .line_to(tip_x - LOCATION_MARKER_TAIL_HALF_WIDTH_PX, tail_top_y);
+        self.ctx
+            .line_to(tip_x + LOCATION_MARKER_TAIL_HALF_WIDTH_PX, tail_top_y);
         self.ctx.fill();
 
-        self.ctx.set_fill_style_str("#fff7ed");
+        self.ctx.set_fill_style_str(LOCATION_MARKER_INNER_DOT_COLOR);
         self.ctx.begin_path();
         let _ = self.ctx.arc(
             head_center_x,
             head_center_y,
-            3.0,
+            LOCATION_MARKER_INNER_DOT_RADIUS_PX,
             0.0,
             std::f64::consts::PI * 2.0,
         );
@@ -1167,7 +1267,7 @@ pub fn init_engine(canvas_or_offscreen: JsValue, config: JsValue) -> Result<MapE
         tile_cache: HashMap::new(),
         pending_tiles: HashSet::new(),
         trajectories: Vec::new(),
-        location_marker: None,
+        location_markers: Vec::new(),
         high_priority_queue: VecDeque::new(),
         medium_priority_queue: VecDeque::new(),
         low_priority_queue: VecDeque::new(),
@@ -1374,6 +1474,12 @@ impl MapEngine {
             .place_marker_at_screen(f64::from(x), f64::from(y));
     }
 
+    pub fn hit_test_marker(&self, x: f32, y: f32) -> Result<JsValue, JsValue> {
+        let state = self.state.borrow();
+        let hover = state.hit_test_marker_at_screen(f64::from(x), f64::from(y));
+        serde_wasm_bindgen::to_value(&hover).map_err(Into::into)
+    }
+
     pub fn frame(&mut self, now_ms: f64) {
         {
             let mut state = self.state.borrow_mut();
@@ -1428,7 +1534,7 @@ impl MapEngine {
         state.bottom_void_color_rgb = None;
         state.view_animation = None;
         state.trajectories.clear();
-        state.location_marker = None;
+        state.location_markers.clear();
         state.dragging = None;
     }
 }

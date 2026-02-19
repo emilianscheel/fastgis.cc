@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { InitConfig, WorkerInMessage, WorkerOutMessage } from "@/lib/map-protocol";
+import type { InitConfig, MarkerHover, WorkerInMessage, WorkerOutMessage } from "@/lib/map-protocol";
 
 type MainThreadEngine = {
   resize(width: number, height: number, dpr: number): void;
@@ -13,6 +13,7 @@ type MainThreadEngine = {
   set_view(lon: number, lat: number, zoom: number): void;
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   place_marker(x: number, y: number): void;
+  hit_test_marker(x: number, y: number): MarkerHover | null;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): unknown;
   clear_trajectory(): void;
@@ -43,9 +44,11 @@ export function useMapEngineRuntime({
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const tileUrlTemplateRef = useRef(initialTileUrlTemplate);
   const activeTileTemplateRef = useRef(initialTileUrlTemplate);
+  const markerHoverRequestIdRef = useRef(0);
 
   const [status, setStatus] = useState<RuntimeStatus>("loading");
   const [canvasInstance, setCanvasInstance] = useState(0);
+  const [markerHover, setMarkerHover] = useState<MarkerHover | null>(null);
   const canInteract = status === "ready";
 
   const viewportSize = useCallback(() => {
@@ -137,6 +140,49 @@ export function useMapEngineRuntime({
     },
     [canInteract, sendToWorker]
   );
+
+  const hoverMarkerAtPoint = useCallback(
+    (x: number, y: number) => {
+      if (!canInteract) {
+        setMarkerHover(null);
+        return;
+      }
+
+      const nextRequestId = markerHoverRequestIdRef.current + 1;
+      markerHoverRequestIdRef.current = nextRequestId;
+
+      if (runtimeModeRef.current === "worker") {
+        if (!workerReadyRef.current) {
+          setMarkerHover(null);
+          return;
+        }
+
+        sendToWorker({
+          type: "HOVER_MARKER",
+          payload: {
+            x,
+            y,
+            requestId: nextRequestId
+          }
+        });
+        return;
+      }
+
+      try {
+        const marker = mainEngineRef.current?.hit_test_marker(x, y) ?? null;
+        setMarkerHover(marker);
+      } catch (error) {
+        setMarkerHover(null);
+        console.error(error);
+      }
+    },
+    [canInteract, sendToWorker]
+  );
+
+  const clearMarkerHover = useCallback(() => {
+    markerHoverRequestIdRef.current += 1;
+    setMarkerHover(null);
+  }, []);
 
   const resizeEngine = useCallback(() => {
     const { width, height } = viewportSize();
@@ -270,6 +316,15 @@ export function useMapEngineRuntime({
 
         setStatus("error");
         console.error(message.payload.message);
+        return;
+      }
+
+      if (message.type === "MARKER_HOVER") {
+        if (message.payload.requestId !== markerHoverRequestIdRef.current) {
+          return;
+        }
+
+        setMarkerHover(message.payload.marker);
       }
     },
     [fallbackToMainThread]
@@ -360,6 +415,7 @@ export function useMapEngineRuntime({
       mainEngineRef.current?.destroy();
       mainEngineRef.current = null;
       runtimeModeRef.current = "none";
+      setMarkerHover(null);
     };
   }, [
     baseMapConfig,
@@ -448,11 +504,14 @@ export function useMapEngineRuntime({
     canvasInstance,
     status,
     canInteract,
+    markerHover,
     viewportSize,
     sendPointerEvent,
     applyWheel,
     zoomToBox,
     placeMarker,
+    hoverMarkerAtPoint,
+    clearMarkerHover,
     loadTrajectoryCsv,
     setTileUrlTemplate
   };

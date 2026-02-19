@@ -86,11 +86,14 @@ export function MapShell() {
     stageRef,
     canvasInstance,
     canInteract,
+    markerHover,
     viewportSize,
     sendPointerEvent,
     applyWheel,
     zoomToBox,
     placeMarker,
+    hoverMarkerAtPoint,
+    clearMarkerHover,
     loadTrajectoryCsv,
     setTileUrlTemplate
   } = useMapEngineRuntime({
@@ -131,14 +134,26 @@ export function MapShell() {
     handleCanvasPointerDown,
     handleCanvasPointerMove,
     handleCanvasPointerUp,
-    handleCanvasPointerCancel
+    handleCanvasPointerCancel,
+    handleCanvasPointerLeave
   } = useBoxZoomTool({
     canInteract,
     cancelWheelZoomAnimation: stopZoomAnimation,
+    onHoverPoint: hoverMarkerAtPoint,
+    onHoverClear: clearMarkerHover,
     onPanPointerEvent: sendPointerEvent,
     onZoomToBox: handleZoomToBox,
     onPlaceMarker: placeMarker
   });
+
+  const handleMarkerHoverCopy = useCallback(async (marker: { lat: number; lon: number }) => {
+    const coordinates = `${marker.lat.toFixed(6)}, ${marker.lon.toFixed(6)}`;
+    try {
+      await navigator.clipboard.writeText(coordinates);
+    } catch (error) {
+      console.error("Failed to copy marker coordinates.", error);
+    }
+  }, []);
 
   const stepZoom = useCallback(
     (direction: "in" | "out") => {
@@ -235,10 +250,13 @@ export function MapShell() {
         canvasKey={canvasInstance}
         cursorClassName={canvasCursorClassName}
         boxZoomRect={boxZoomRect}
+        markerHover={markerHover}
         onPointerDown={handleCanvasPointerDown}
         onPointerMove={handleCanvasPointerMove}
         onPointerUp={handleCanvasPointerUp}
         onPointerCancel={handleCanvasPointerCancel}
+        onPointerLeave={handleCanvasPointerLeave}
+        onMarkerHoverCopy={handleMarkerHoverCopy}
       />
       <CsvDropOverlay enabled={canInteract} onDropFiles={handleDroppedFiles} />
       <MapToolbar

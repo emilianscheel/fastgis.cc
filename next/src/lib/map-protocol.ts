@@ -19,6 +19,13 @@ export type CsvLoadResult = {
   bounds: CsvBounds | null;
 };
 
+export type MarkerHover = {
+  lon: number;
+  lat: number;
+  screenX: number;
+  screenY: number;
+};
+
 export type WorkerInMessage =
   | {
       type: "INIT";
@@ -81,6 +88,14 @@ export type WorkerInMessage =
       };
     }
   | {
+      type: "HOVER_MARKER";
+      payload: {
+        x: number;
+        y: number;
+        requestId: number;
+      };
+    }
+  | {
       type: "FRAME_TICK";
       payload: {
         nowMs: number;
@@ -114,6 +129,13 @@ export type WorkerOutMessage =
   | {
       type: "CSV_LOADED";
       payload: CsvLoadResult;
+    }
+  | {
+      type: "MARKER_HOVER";
+      payload: {
+        marker: MarkerHover | null;
+        requestId: number;
+      };
     }
   | {
       type: "STATUS";

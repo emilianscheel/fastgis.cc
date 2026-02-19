@@ -8,6 +8,7 @@ export class MapEngine {
     clear_trajectory(): void;
     destroy(): void;
     frame(now_ms: number): void;
+    hit_test_marker(x: number, y: number): any;
     load_trajectory_csv(bytes: Uint8Array): any;
     place_marker(x: number, y: number): void;
     pointer_down(x: number, y: number, button: number): void;
@@ -31,6 +32,7 @@ export interface InitOutput {
     readonly mapengine_clear_trajectory: (a: number) => void;
     readonly mapengine_destroy: (a: number) => void;
     readonly mapengine_frame: (a: number, b: number) => void;
+    readonly mapengine_hit_test_marker: (a: number, b: number, c: number) => [number, number, number];
     readonly mapengine_load_trajectory_csv: (a: number, b: number, c: number) => [number, number, number];
     readonly mapengine_place_marker: (a: number, b: number, c: number) => void;
     readonly mapengine_pointer_down: (a: number, b: number, c: number, d: number) => void;

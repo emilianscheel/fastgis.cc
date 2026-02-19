@@ -23,6 +23,8 @@ type UseBoxZoomToolOptions = {
   canInteract: boolean;
   minSelectionSizePx?: number;
   cancelWheelZoomAnimation: () => void;
+  onHoverPoint: (x: number, y: number) => void;
+  onHoverClear: () => void;
   onPanPointerEvent: (
     type: PointerMessageType,
     x: number,
@@ -44,6 +46,8 @@ export function useBoxZoomTool({
   canInteract,
   minSelectionSizePx = DEFAULT_MIN_SELECTION_PX,
   cancelWheelZoomAnimation,
+  onHoverPoint,
+  onHoverClear,
   onPanPointerEvent,
   onZoomToBox,
   onPlaceMarker
@@ -75,9 +79,11 @@ export function useBoxZoomTool({
       }
 
       const { x, y } = withCanvasPoint(event);
+      onHoverPoint(x, y);
 
       if (activeTool === "marker") {
         cancelWheelZoomAnimation();
+        onHoverClear();
         if (canInteract) {
           onPlaceMarker(x, y);
         }
@@ -89,6 +95,7 @@ export function useBoxZoomTool({
 
       if (activeTool === "box-zoom") {
         cancelWheelZoomAnimation();
+        onHoverClear();
         setBoxZoomDrag({
           startX: x,
           startY: y,
@@ -104,6 +111,8 @@ export function useBoxZoomTool({
       activeTool,
       cancelWheelZoomAnimation,
       canInteract,
+      onHoverClear,
+      onHoverPoint,
       onPanPointerEvent,
       onPlaceMarker,
       withCanvasPoint
@@ -113,6 +122,7 @@ export function useBoxZoomTool({
   const handleCanvasPointerMove = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
       const { x, y } = withCanvasPoint(event);
+      onHoverPoint(x, y);
 
       if (activeTool === "box-zoom") {
         setBoxZoomDrag((current) => {
@@ -131,7 +141,7 @@ export function useBoxZoomTool({
 
       onPanPointerEvent("POINTER_MOVE", x, y, event.button);
     },
-    [activeTool, onPanPointerEvent, withCanvasPoint]
+    [activeTool, onHoverPoint, onPanPointerEvent, withCanvasPoint]
   );
 
   const handleCanvasPointerUp = useCallback(
@@ -141,6 +151,7 @@ export function useBoxZoomTool({
       }
 
       const { x, y } = withCanvasPoint(event);
+      onHoverPoint(x, y);
 
       if (activeTool === "box-zoom") {
         setBoxZoomDrag((current) => {
@@ -166,11 +177,20 @@ export function useBoxZoomTool({
 
       onPanPointerEvent("POINTER_UP", x, y, event.button);
     },
-    [activeTool, canInteract, minSelectionSizePx, onPanPointerEvent, onZoomToBox, withCanvasPoint]
+    [
+      activeTool,
+      canInteract,
+      minSelectionSizePx,
+      onHoverPoint,
+      onPanPointerEvent,
+      onZoomToBox,
+      withCanvasPoint
+    ]
   );
 
   const handleCanvasPointerCancel = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
+      onHoverClear();
       if (activeTool === "box-zoom") {
         cancelWheelZoomAnimation();
         setBoxZoomDrag(null);
@@ -180,7 +200,14 @@ export function useBoxZoomTool({
       const { x, y } = withCanvasPoint(event);
       onPanPointerEvent("POINTER_UP", x, y, event.button);
     },
-    [activeTool, cancelWheelZoomAnimation, onPanPointerEvent, withCanvasPoint]
+    [activeTool, cancelWheelZoomAnimation, onHoverClear, onPanPointerEvent, withCanvasPoint]
+  );
+
+  const handleCanvasPointerLeave = useCallback(
+    (_event: React.PointerEvent<HTMLDivElement>) => {
+      onHoverClear();
+    },
+    [onHoverClear]
   );
 
   const boxZoomRect = useMemo<BoxZoomRect | null>(() => {
@@ -207,20 +234,22 @@ export function useBoxZoomTool({
       const next = current === "box-zoom" ? "pan" : "box-zoom";
       if (next === "box-zoom") {
         cancelWheelZoomAnimation();
+        onHoverClear();
       }
       return next;
     });
-  }, [cancelWheelZoomAnimation]);
+  }, [cancelWheelZoomAnimation, onHoverClear]);
 
   const toggleMarkerTool = useCallback(() => {
     setActiveTool((current) => {
       const next = current === "marker" ? "pan" : "marker";
       if (next === "marker") {
         cancelWheelZoomAnimation();
+        onHoverClear();
       }
       return next;
     });
-  }, [cancelWheelZoomAnimation]);
+  }, [cancelWheelZoomAnimation, onHoverClear]);
 
   return {
     activeTool,
@@ -233,6 +262,7 @@ export function useBoxZoomTool({
     handleCanvasPointerDown,
     handleCanvasPointerMove,
     handleCanvasPointerUp,
-    handleCanvasPointerCancel
+    handleCanvasPointerCancel,
+    handleCanvasPointerLeave
   };
 }

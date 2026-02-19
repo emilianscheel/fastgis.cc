@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import type { CsvLoadResult, WorkerInMessage, WorkerOutMessage } from "../lib/map-protocol";
+import type { CsvLoadResult, MarkerHover, WorkerInMessage, WorkerOutMessage } from "../lib/map-protocol";
 
 type WasmMapEngine = {
   resize(width: number, height: number, dpr: number): void;
@@ -11,6 +11,7 @@ type WasmMapEngine = {
   set_view(lon: number, lat: number, zoom: number): void;
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   place_marker(x: number, y: number): void;
+  hit_test_marker(x: number, y: number): MarkerHover | null;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
   clear_trajectory(): void;
@@ -147,6 +148,18 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
 
   if (message.type === "PLACE_MARKER") {
     engine.place_marker(message.payload.x, message.payload.y);
+    return;
+  }
+
+  if (message.type === "HOVER_MARKER") {
+    const marker = engine.hit_test_marker(message.payload.x, message.payload.y) ?? null;
+    postMessageToMain({
+      type: "MARKER_HOVER",
+      payload: {
+        marker,
+        requestId: message.payload.requestId
+      }
+    });
     return;
   }
 

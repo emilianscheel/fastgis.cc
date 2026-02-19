@@ -32,6 +32,18 @@ export class MapEngine {
         wasm.mapengine_frame(this.__wbg_ptr, now_ms);
     }
     /**
+     * @param {number} x
+     * @param {number} y
+     * @returns {any}
+     */
+    hit_test_marker(x, y) {
+        const ret = wasm.mapengine_hit_test_marker(this.__wbg_ptr, x, y);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @param {Uint8Array} bytes
      * @returns {any}
      */
