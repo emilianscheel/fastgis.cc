@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Rust
+target/
+**/*.rs.bk
+
+# Bun / Node / Next
+node_modules/
+next/node_modules/
+next/.next/
+next/out/
+next/coverage/
+next/playwright-report/
+next/test-results/
+next/.turbo/
+
+# WASM build output
+next/src/wasm/pkg/*
+!next/src/wasm/pkg/.gitkeep
+!next/src/wasm/pkg/README.md
+!next/src/wasm/pkg/map_engine_wasm.js
+
+# Logs
+*.log
+
