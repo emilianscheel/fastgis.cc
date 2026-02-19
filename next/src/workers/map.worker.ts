@@ -21,8 +21,11 @@ type WasmModule = {
 };
 
 const workerContext = self as unknown as DedicatedWorkerGlobalScope;
+const wasmBinaryUrl = new URL("../wasm/pkg/map_engine_wasm_bg.wasm", import.meta.url);
+
 let wasmModulePromise: Promise<WasmModule> | null = null;
 let engine: WasmMapEngine | null = null;
+let appOrigin: string | null = null;
 
 function postMessageToMain(message: WorkerOutMessage): void {
   workerContext.postMessage(message);
@@ -53,7 +56,21 @@ function normalizeError(error: unknown): string {
 async function loadWasmModule(): Promise<WasmModule> {
   if (!wasmModulePromise) {
     wasmModulePromise = import("../wasm/pkg/map_engine_wasm.js").then(async (module) => {
-      await module.default();
+      const wasmPath = typeof wasmBinaryUrl === "string" ? wasmBinaryUrl : wasmBinaryUrl.toString();
+
+      if (/^https?:\/\//i.test(wasmPath)) {
+        await module.default(wasmPath);
+      } else if (wasmPath.startsWith("/")) {
+        const origin = appOrigin ?? workerContext.location.origin;
+        if (origin && origin !== "null") {
+          await module.default(new URL(wasmPath, origin).toString());
+        } else {
+          await module.default(wasmPath);
+        }
+      } else {
+        await module.default(wasmPath);
+      }
+
       return module as unknown as WasmModule;
     });
   }
@@ -62,6 +79,7 @@ async function loadWasmModule(): Promise<WasmModule> {
 
 async function handleMessage(message: WorkerInMessage): Promise<void> {
   if (message.type === "INIT") {
+    appOrigin = message.payload.origin;
     postMessageToMain({ type: "STATUS", payload: { phase: "loading" } });
     const module = await loadWasmModule();
     engine = module.init_engine(message.payload.canvas, message.payload.config);

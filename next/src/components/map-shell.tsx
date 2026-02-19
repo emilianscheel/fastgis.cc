@@ -2,6 +2,7 @@
 
 import type * as React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Minus, Plus } from "lucide-react";
 
 import type { InitConfig, WorkerInMessage, WorkerOutMessage } from "@/lib/map-protocol";
 
@@ -268,6 +269,7 @@ export function MapShell() {
               width,
               height,
               dpr: window.devicePixelRatio || 1,
+              origin: window.location.origin,
               config: MAP_CONFIG
             }
           };
@@ -412,12 +414,12 @@ export function MapShell() {
         />
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 p-4">
-        <div className="pointer-events-auto mx-auto flex w-full max-w-6xl items-center justify-between rounded-sm border border-white/20 bg-black/65 px-3 py-2 backdrop-blur-sm">
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-20">
+        <div className="pointer-events-auto flex w-full items-center justify-between border-b border-black/15 bg-white/80 px-4 py-2 backdrop-blur-md">
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="rounded-sm border border-white/25 bg-white/10 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+              className="h-9 rounded-none border border-black/20 bg-white px-3 text-sm font-medium text-black transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => fileInputRef.current?.click()}
               disabled={!canInteract}
             >
@@ -440,28 +442,24 @@ export function MapShell() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="h-9 w-9 rounded-sm border border-white/25 bg-white/10 text-lg font-semibold leading-none text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-none border border-black/20 bg-white text-black transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => stepZoom("in")}
               disabled={!canInteract}
               aria-label="Zoom in"
             >
-              +
+              <Plus className="h-4 w-4" aria-hidden="true" />
             </button>
             <button
               type="button"
-              className="h-9 w-9 rounded-sm border border-white/25 bg-white/10 text-lg font-semibold leading-none text-white transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-9 w-9 items-center justify-center rounded-none border border-black/20 bg-white text-black transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => stepZoom("out")}
               disabled={!canInteract}
               aria-label="Zoom out"
             >
-              -
+              <Minus className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
         </div>
-      </div>
-
-      <div className="absolute bottom-3 right-3 rounded bg-black/50 px-2 py-1 text-[11px] text-slate-100">
-        © OpenStreetMap contributors
       </div>
     </main>
   );

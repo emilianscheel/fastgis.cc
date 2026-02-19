@@ -22,14 +22,15 @@ export type CsvLoadResult = {
 export type WorkerInMessage =
   | {
       type: "INIT";
-      payload: {
-        canvas: OffscreenCanvas;
-        width: number;
-        height: number;
-        dpr: number;
-        config: InitConfig;
-      };
-    }
+    payload: {
+      canvas: OffscreenCanvas;
+      width: number;
+      height: number;
+      dpr: number;
+      origin: string;
+      config: InitConfig;
+    };
+  }
   | {
       type: "RESIZE";
       payload: {
@@ -105,4 +106,3 @@ export type WorkerOutMessage =
         message: string;
       };
     };
-
