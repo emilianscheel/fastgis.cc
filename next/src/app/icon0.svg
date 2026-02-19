@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" width="162" height="162"><svg xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" width="162" height="162"><svg width="162" height="162" viewBox="0 0 162 162" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_11_6)">
+<circle cx="81" cy="81" r="54" fill="white" stroke="#464948" stroke-width="12"></circle>
+<path d="M132 69.2H90.2727L99.5455 20L30 93.8H71.7273L62.4545 143L132 69.2Z" fill="white" stroke="#464948" stroke-width="12"></path>
+<path d="M162 109C162 138.271 138.271 162 109 162H53C23.7289 162 0 138.271 0 109V53C0 23.7289 23.7289 0 53 0H109C138.271 0 162 23.7289 162 53V109ZM81 21C47.8629 21 21 47.8629 21 81C21 114.137 47.8629 141 81 141C114.137 141 141 114.137 141 81C141 47.8629 114.137 21 81 21Z" fill="white"></path>
+</g>
+<defs>
+<clipPath id="clip0_11_6">
+<rect width="162" height="162" rx="29" fill="white"></rect>
+</clipPath>
+</defs>
+</svg></svg><style>@media (prefers-color-scheme: light) { :root { filter: none; } }
+@media (prefers-color-scheme: dark) { :root { filter: none; } }
+</style></svg>

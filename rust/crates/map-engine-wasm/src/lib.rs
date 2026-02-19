@@ -22,6 +22,8 @@ const TILE_PREFETCH_MARGIN: i32 = 1;
 const TILE_DRAW_OVERLAP_PX: f64 = 1.0;
 const MAX_IN_FLIGHT_REQUESTS: usize = 8;
 const VOID_COLOR_BLEND_ALPHA: f64 = 0.25;
+const BOX_ZOOM_FIT_PADDING: f64 = 0.9;
+const VIEW_ANIMATION_DURATION_MS: f64 = 300.0;
 
 #[wasm_bindgen(inline_js = r#"
 export async function fetchTileBitmap(url) {
@@ -137,6 +139,18 @@ struct DragState {
     start_y: f64,
     start_world0_x: f64,
     start_world0_y: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewAnimation {
+    start_lon: f64,
+    start_lat: f64,
+    start_zoom: f64,
+    target_lon: f64,
+    target_lat: f64,
+    target_zoom: f64,
+    start_ms: f64,
+    duration_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -313,6 +327,8 @@ struct EngineState {
     render_zoom: u8,
     center_lon: f64,
     center_lat: f64,
+    view_animation: Option<ViewAnimation>,
+    last_frame_now_ms: f64,
     dragging: Option<DragState>,
     cache_tick: u64,
     cache_limit: usize,
@@ -366,6 +382,76 @@ impl EngineState {
 
     fn center_world0(&self) -> (f64, f64) {
         lon_lat_to_world(self.center_lon, self.center_lat, 0, self.tile_size)
+    }
+
+    fn cancel_view_animation(&mut self) {
+        self.view_animation = None;
+    }
+
+    fn interpolate_lon_shortest(start_lon: f64, target_lon: f64, t: f64) -> f64 {
+        let wrapped_delta = (target_lon - start_lon + 540.0).rem_euclid(360.0) - 180.0;
+        normalize_lon(start_lon + wrapped_delta * t)
+    }
+
+    fn start_view_animation(&mut self, target_lon: f64, target_lat: f64, target_zoom: f64) {
+        let target_lon = normalize_lon(target_lon);
+        let target_lat = clamp_lat(target_lat);
+        let target_zoom = self.zoom_clamp_f64(target_zoom);
+
+        let lon_delta = (target_lon - self.center_lon + 540.0).rem_euclid(360.0) - 180.0;
+        if lon_delta.abs() < 1e-9
+            && (target_lat - self.center_lat).abs() < 1e-9
+            && (target_zoom - self.zoom).abs() < 1e-9
+        {
+            self.cancel_view_animation();
+            self.center_lon = target_lon;
+            self.center_lat = target_lat;
+            self.zoom = target_zoom;
+            self.render_zoom = self.zoom.round() as u8;
+            return;
+        }
+
+        self.view_animation = Some(ViewAnimation {
+            start_lon: self.center_lon,
+            start_lat: self.center_lat,
+            start_zoom: self.zoom,
+            target_lon,
+            target_lat,
+            target_zoom,
+            start_ms: self.last_frame_now_ms,
+            duration_ms: VIEW_ANIMATION_DURATION_MS,
+        });
+    }
+
+    fn update_view_animation(&mut self, now_ms: f64) {
+        let Some(animation) = self.view_animation else {
+            return;
+        };
+
+        let duration_ms = animation.duration_ms.max(1.0);
+        let progress = ((now_ms - animation.start_ms) / duration_ms).clamp(0.0, 1.0);
+        let eased_progress = 1.0 - (1.0 - progress).powi(3);
+
+        self.center_lon = Self::interpolate_lon_shortest(
+            animation.start_lon,
+            animation.target_lon,
+            eased_progress,
+        );
+        self.center_lat = clamp_lat(
+            animation.start_lat + (animation.target_lat - animation.start_lat) * eased_progress,
+        );
+        self.zoom = self.zoom_clamp_f64(
+            animation.start_zoom + (animation.target_zoom - animation.start_zoom) * eased_progress,
+        );
+        self.render_zoom = self.zoom.round() as u8;
+
+        if progress >= 1.0 {
+            self.view_animation = None;
+            self.center_lon = normalize_lon(animation.target_lon);
+            self.center_lat = clamp_lat(animation.target_lat);
+            self.zoom = self.zoom_clamp_f64(animation.target_zoom);
+            self.render_zoom = self.zoom.round() as u8;
+        }
     }
 
     fn trajectories_bounds(&self) -> Option<Bounds> {
@@ -708,13 +794,55 @@ impl EngineState {
     }
 
     fn set_view(&mut self, lon: f64, lat: f64, zoom: f32) {
+        self.cancel_view_animation();
         self.center_lon = normalize_lon(lon);
         self.center_lat = clamp_lat(lat);
         self.zoom = self.zoom_clamp_f64(f64::from(zoom));
         self.render_zoom = self.zoom.round() as u8;
     }
 
-    fn draw(&mut self) {
+    fn zoom_to_box(&mut self, start_x: f64, start_y: f64, end_x: f64, end_y: f64) {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+
+        let left = start_x.min(end_x).clamp(0.0, self.width);
+        let right = start_x.max(end_x).clamp(0.0, self.width);
+        let top = start_y.min(end_y).clamp(0.0, self.height);
+        let bottom = start_y.max(end_y).clamp(0.0, self.height);
+
+        let selection_width = right - left;
+        let selection_height = bottom - top;
+        if selection_width < 1.0 || selection_height < 1.0 {
+            return;
+        }
+
+        let current_display_scale = Self::zoom_scale(self.zoom).max(1e-9);
+        let (center_world0_x, center_world0_y) = self.center_world0();
+        let left_world0 = center_world0_x + (left - self.width * 0.5) / current_display_scale;
+        let right_world0 = center_world0_x + (right - self.width * 0.5) / current_display_scale;
+        let top_world0 = center_world0_y + (top - self.height * 0.5) / current_display_scale;
+        let bottom_world0 = center_world0_y + (bottom - self.height * 0.5) / current_display_scale;
+
+        let world_width = (right_world0 - left_world0).abs().max(1e-12);
+        let world_height = (bottom_world0 - top_world0).abs().max(1e-12);
+        let target_display_scale = ((self.width / world_width).min(self.height / world_height)
+            * BOX_ZOOM_FIT_PADDING)
+            .max(1e-9);
+        let target_zoom = self.zoom_clamp_f64(target_display_scale.log2());
+
+        let focus_world0_x = (left_world0 + right_world0) * 0.5;
+        let focus_world0_y = (top_world0 + bottom_world0) * 0.5;
+        let (target_lon, target_lat) =
+            world_to_lon_lat(focus_world0_x, focus_world0_y, 0, self.tile_size);
+
+        self.start_view_animation(target_lon, target_lat, target_zoom);
+    }
+
+    fn draw(&mut self, now_ms: f64) {
+        self.last_frame_now_ms = now_ms;
+        self.update_view_animation(now_ms);
+
         if self.width <= 0.0 || self.height <= 0.0 {
             return;
         }
@@ -840,6 +968,7 @@ impl EngineState {
             }
         }
 
+        self.cancel_view_animation();
         self.center_lon = normalize_lon(center_lon);
         self.center_lat = clamp_lat(center_lat);
         self.zoom = f64::from(best_zoom);
@@ -858,6 +987,7 @@ impl EngineState {
             return;
         }
 
+        self.cancel_view_animation();
         self.tile_url_template = template;
         self.pending_tiles.clear();
         self.high_priority_queue.clear();
@@ -942,6 +1072,8 @@ pub fn init_engine(canvas_or_offscreen: JsValue, config: JsValue) -> Result<MapE
         render_zoom: initial_render_zoom,
         center_lon: 0.0,
         center_lat: 20.0,
+        view_animation: None,
+        last_frame_now_ms: 0.0,
         dragging: None,
         cache_tick: 0,
         cache_limit,
@@ -1061,6 +1193,7 @@ impl MapEngine {
         }
 
         let mut state = self.state.borrow_mut();
+        state.cancel_view_animation();
         let (world0_x, world0_y) =
             lon_lat_to_world(state.center_lon, state.center_lat, 0, state.tile_size);
         state.dragging = Some(DragState {
@@ -1100,6 +1233,7 @@ impl MapEngine {
         }
 
         let mut state = self.state.borrow_mut();
+        state.cancel_view_animation();
         let old_zoom = state.zoom;
         let zoom_delta = -f64::from(delta_y) * WHEEL_ZOOM_SENSITIVITY;
         if zoom_delta.abs() < f64::EPSILON {
@@ -1137,10 +1271,19 @@ impl MapEngine {
         self.state.borrow_mut().set_view(lon, lat, zoom);
     }
 
-    pub fn frame(&mut self, _now_ms: f64) {
+    pub fn zoom_to_box(&mut self, start_x: f32, start_y: f32, end_x: f32, end_y: f32) {
+        self.state.borrow_mut().zoom_to_box(
+            f64::from(start_x),
+            f64::from(start_y),
+            f64::from(end_x),
+            f64::from(end_y),
+        );
+    }
+
+    pub fn frame(&mut self, now_ms: f64) {
         {
             let mut state = self.state.borrow_mut();
-            state.draw();
+            state.draw(now_ms);
         }
 
         pump_requests(self.state.clone());
@@ -1189,6 +1332,7 @@ impl MapEngine {
         state.tile_cache.clear();
         state.top_void_color_rgb = None;
         state.bottom_void_color_rgb = None;
+        state.view_animation = None;
         state.trajectories.clear();
         state.dragging = None;
     }

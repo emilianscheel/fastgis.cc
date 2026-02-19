@@ -9,6 +9,7 @@ type WasmMapEngine = {
   pointer_up(x: number, y: number): void;
   wheel(deltaY: number, x: number, y: number, ctrlKey: boolean): void;
   set_view(lon: number, lat: number, zoom: number): void;
+  zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
   clear_trajectory(): void;
@@ -130,6 +131,16 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
 
   if (message.type === "SET_VIEW") {
     engine.set_view(message.payload.lon, message.payload.lat, message.payload.zoom);
+    return;
+  }
+
+  if (message.type === "ZOOM_TO_BOX") {
+    engine.zoom_to_box(
+      message.payload.startX,
+      message.payload.startY,
+      message.payload.endX,
+      message.payload.endY
+    );
     return;
   }
 

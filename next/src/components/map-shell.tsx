@@ -1,8 +1,7 @@
 "use client";
 
-import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Minus, Plus } from "lucide-react";
+import { Crop, Minus, Plus } from "lucide-react";
 import { useTheme } from "next-themes";
 
 import { CsvDropOverlay } from "@/components/csv-drop-overlay";
@@ -15,6 +14,7 @@ import {
   MenubarTrigger
 } from "@/components/ui/menubar";
 import { Button } from "@/components/ui/button";
+import { useBoxZoomTool } from "@/hooks/use-box-zoom-tool";
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
 import type { InitConfig, WorkerInMessage, WorkerOutMessage } from "@/lib/map-protocol";
 
@@ -25,6 +25,7 @@ type MainThreadEngine = {
   pointer_up(x: number, y: number): void;
   wheel(deltaY: number, x: number, y: number, ctrlKey: boolean): void;
   set_view(lon: number, lat: number, zoom: number): void;
+  zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): unknown;
   clear_trajectory(): void;
@@ -177,6 +178,31 @@ export function MapShell() {
     [sendToWorker]
   );
 
+  const zoomToBox = useCallback(
+    (startX: number, startY: number, endX: number, endY: number) => {
+      if (zoomAnimationRef.current !== null) {
+        window.cancelAnimationFrame(zoomAnimationRef.current);
+        zoomAnimationRef.current = null;
+      }
+
+      if (runtimeModeRef.current === "worker") {
+        sendToWorker({
+          type: "ZOOM_TO_BOX",
+          payload: {
+            startX,
+            startY,
+            endX,
+            endY
+          }
+        });
+        return;
+      }
+
+      mainEngineRef.current?.zoom_to_box(startX, startY, endX, endY);
+    },
+    [sendToWorker]
+  );
+
   const resizeEngine = useCallback(() => {
     const { width, height } = viewportSize();
     const dpr = window.devicePixelRatio || 1;
@@ -222,6 +248,22 @@ export function MapShell() {
       zoomAnimationRef.current = null;
     }
   }, []);
+
+  const {
+    isBoxZoomActive,
+    boxZoomRect,
+    canvasCursorClassName,
+    toggleBoxZoomTool,
+    handleCanvasPointerDown,
+    handleCanvasPointerMove,
+    handleCanvasPointerUp,
+    handleCanvasPointerCancel
+  } = useBoxZoomTool({
+    canInteract,
+    cancelWheelZoomAnimation: stopZoomAnimation,
+    onPanPointerEvent: sendPointerEvent,
+    onZoomToBox: zoomToBox
+  });
 
   const teardownWorker = useCallback(() => {
     workerReadyRef.current = false;
@@ -420,17 +462,6 @@ export function MapShell() {
     viewportSize
   ]);
 
-  const withCanvasPoint = useCallback(
-    (event: React.PointerEvent<HTMLCanvasElement>) => {
-      const rect = event.currentTarget.getBoundingClientRect();
-      return {
-        x: event.clientX - rect.left,
-        y: event.clientY - rect.top
-      };
-    },
-    []
-  );
-
   const handleCsvBytes = useCallback(
     (fileName: string, bytes: Uint8Array) => {
       if (!canInteract) return;
@@ -580,23 +611,26 @@ export function MapShell() {
           key={canvasInstance}
           ref={canvasRef}
           aria-label="map-canvas"
-          className="h-full w-full touch-none select-none"
-          onPointerDown={(event) => {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            const { x, y } = withCanvasPoint(event);
-            sendPointerEvent("POINTER_DOWN", x, y, event.button);
-          }}
-          onPointerMove={(event) => {
-            const { x, y } = withCanvasPoint(event);
-            sendPointerEvent("POINTER_MOVE", x, y, event.button);
-          }}
-          onPointerUp={(event) => {
-            event.currentTarget.releasePointerCapture(event.pointerId);
-            const { x, y } = withCanvasPoint(event);
-            sendPointerEvent("POINTER_UP", x, y, event.button);
-          }}
+          className={`h-full w-full touch-none select-none ${canvasCursorClassName}`}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
+          onPointerCancel={handleCanvasPointerCancel}
         />
       </div>
+      {boxZoomRect ? (
+        <div className="pointer-events-none absolute inset-0 z-10">
+          <div
+            className="absolute border border-primary bg-primary/10"
+            style={{
+              left: `${boxZoomRect.left}px`,
+              top: `${boxZoomRect.top}px`,
+              width: `${boxZoomRect.width}px`,
+              height: `${boxZoomRect.height}px`
+            }}
+          />
+        </div>
+      ) : null}
       <CsvDropOverlay enabled={canInteract} onDropFiles={handleDroppedFiles} />
 
       <div className="pointer-events-none fixed inset-x-0 top-0 z-20">
@@ -623,6 +657,21 @@ export function MapShell() {
                 Style
               </div>
             )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={`h-9 w-9 rounded-none border-border/80 p-0 text-foreground hover:bg-muted/60 ${
+                isBoxZoomActive ? "bg-muted" : "bg-background"
+              }`}
+              onClick={toggleBoxZoomTool}
+              disabled={!canInteract}
+              aria-label="Box zoom tool"
+              aria-pressed={isBoxZoomActive}
+              title="Box zoom tool"
+            >
+              <Crop className="h-4 w-4" aria-hidden="true" />
+            </Button>
             <Button
               type="button"
               variant="outline"

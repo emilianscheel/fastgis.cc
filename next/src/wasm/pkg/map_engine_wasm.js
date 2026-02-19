@@ -26,10 +26,10 @@ export class MapEngine {
         wasm.mapengine_destroy(this.__wbg_ptr);
     }
     /**
-     * @param {number} _now_ms
+     * @param {number} now_ms
      */
-    frame(_now_ms) {
-        wasm.mapengine_frame(this.__wbg_ptr, _now_ms);
+    frame(now_ms) {
+        wasm.mapengine_frame(this.__wbg_ptr, now_ms);
     }
     /**
      * @param {Uint8Array} bytes
@@ -98,6 +98,15 @@ export class MapEngine {
      */
     wheel(delta_y, x, y, _ctrl_key) {
         wasm.mapengine_wheel(this.__wbg_ptr, delta_y, x, y, _ctrl_key);
+    }
+    /**
+     * @param {number} start_x
+     * @param {number} start_y
+     * @param {number} end_x
+     * @param {number} end_y
+     */
+    zoom_to_box(start_x, start_y, end_x, end_y) {
+        wasm.mapengine_zoom_to_box(this.__wbg_ptr, start_x, start_y, end_x, end_y);
     }
 }
 if (Symbol.dispose) MapEngine.prototype[Symbol.dispose] = MapEngine.prototype.free;

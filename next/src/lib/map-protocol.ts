@@ -65,6 +65,15 @@ export type WorkerInMessage =
       };
     }
   | {
+      type: "ZOOM_TO_BOX";
+      payload: {
+        startX: number;
+        startY: number;
+        endX: number;
+        endY: number;
+      };
+    }
+  | {
       type: "FRAME_TICK";
       payload: {
         nowMs: number;

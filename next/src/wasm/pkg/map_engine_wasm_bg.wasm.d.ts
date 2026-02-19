@@ -14,6 +14,7 @@ export const mapengine_resize: (a: number, b: number, c: number, d: number) => v
 export const mapengine_set_tile_url_template: (a: number, b: number, c: number) => void;
 export const mapengine_set_view: (a: number, b: number, c: number, d: number) => void;
 export const mapengine_wheel: (a: number, b: number, c: number, d: number, e: number) => void;
+export const mapengine_zoom_to_box: (a: number, b: number, c: number, d: number, e: number) => void;
 export const wasm_bindgen__closure__destroy__h83ed2f27720389ea: (a: number, b: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__hf61daddeb0e223da: (a: number, b: number, c: any) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

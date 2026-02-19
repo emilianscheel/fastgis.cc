@@ -7,7 +7,7 @@ export class MapEngine {
     [Symbol.dispose](): void;
     clear_trajectory(): void;
     destroy(): void;
-    frame(_now_ms: number): void;
+    frame(now_ms: number): void;
     load_trajectory_csv(bytes: Uint8Array): any;
     pointer_down(x: number, y: number, button: number): void;
     pointer_move(x: number, y: number): void;
@@ -16,6 +16,7 @@ export class MapEngine {
     set_tile_url_template(template: string): void;
     set_view(lon: number, lat: number, zoom: number): void;
     wheel(delta_y: number, x: number, y: number, _ctrl_key: boolean): void;
+    zoom_to_box(start_x: number, start_y: number, end_x: number, end_y: number): void;
 }
 
 export function init_engine(canvas_or_offscreen: any, config: any): MapEngine;
@@ -37,6 +38,7 @@ export interface InitOutput {
     readonly mapengine_set_tile_url_template: (a: number, b: number, c: number) => void;
     readonly mapengine_set_view: (a: number, b: number, c: number, d: number) => void;
     readonly mapengine_wheel: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly mapengine_zoom_to_box: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasm_bindgen__closure__destroy__h83ed2f27720389ea: (a: number, b: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hf61daddeb0e223da: (a: number, b: number, c: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
