@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "bash ./scripts/dev.sh",
     "build": "bash ./scripts/build.sh",
+    "build:vercel": "bun x next build",
     "test": "bash ./scripts/test.sh",
     "build:wasm": "bash ./scripts/build-wasm.sh",
     "lint": "next lint"
@@ -29,4 +30,3 @@
     "typescript": "^5.7.2"
   }
 }
-
