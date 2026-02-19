@@ -1,6 +1,6 @@
 "use client";
 
-import { Crop, Minus, Plus } from "lucide-react";
+import { Crop, MapPin, Minus, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -23,8 +23,10 @@ type MapToolbarProps = {
   mapStyleId: string;
   mapStyles: MapStyleOption[];
   isBoxZoomActive: boolean;
+  isMarkerActive: boolean;
   onMapStyleChange: (value: string) => void;
   onToggleBoxZoom: () => void;
+  onToggleMarker: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
 };
@@ -35,8 +37,10 @@ export function MapToolbar({
   mapStyleId,
   mapStyles,
   isBoxZoomActive,
+  isMarkerActive,
   onMapStyleChange,
   onToggleBoxZoom,
+  onToggleMarker,
   onZoomIn,
   onZoomOut
 }: MapToolbarProps) {
@@ -65,6 +69,21 @@ export function MapToolbar({
               Style
             </div>
           )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={`h-9 w-9 rounded-none border-border/80 p-0 text-foreground hover:bg-muted/60 ${
+              isMarkerActive ? "bg-muted" : "bg-background"
+            }`}
+            onClick={onToggleMarker}
+            disabled={!canInteract}
+            aria-label="Place marker tool"
+            aria-pressed={isMarkerActive}
+            title="Place marker tool"
+          >
+            <MapPin className="h-4 w-4" aria-hidden="true" />
+          </Button>
           <Button
             type="button"
             variant="outline"

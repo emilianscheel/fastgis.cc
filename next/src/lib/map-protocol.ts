@@ -74,6 +74,13 @@ export type WorkerInMessage =
       };
     }
   | {
+      type: "PLACE_MARKER";
+      payload: {
+        x: number;
+        y: number;
+      };
+    }
+  | {
       type: "FRAME_TICK";
       payload: {
         nowMs: number;

@@ -17,7 +17,7 @@ use web_sys::{
 };
 
 static PANIC_HOOK: Once = Once::new();
-const WHEEL_ZOOM_SENSITIVITY: f64 = 1.0 / 1200.0;
+const WHEEL_ZOOM_SENSITIVITY: f64 = 1.0 / 1000.0;
 const TILE_PREFETCH_MARGIN: i32 = 1;
 const TILE_DRAW_OVERLAP_PX: f64 = 1.0;
 const MAX_IN_FLIGHT_REQUESTS: usize = 8;
@@ -152,6 +152,12 @@ struct ViewAnimation {
     target_zoom: f64,
     start_ms: f64,
     duration_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocationMarker {
+    lon: f64,
+    lat: f64,
 }
 
 #[derive(Serialize)]
@@ -336,6 +342,7 @@ struct EngineState {
     tile_cache: HashMap<TileKey, CachedTile>,
     pending_tiles: HashSet<TileKey>,
     trajectories: Vec<Vec<TrajectoryPoint>>,
+    location_marker: Option<LocationMarker>,
     high_priority_queue: VecDeque<TileKey>,
     medium_priority_queue: VecDeque<TileKey>,
     low_priority_queue: VecDeque<TileKey>,
@@ -834,6 +841,27 @@ impl EngineState {
         );
     }
 
+    fn place_marker_at_screen(&mut self, x: f64, y: f64) {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+
+        let clamped_x = x.clamp(0.0, self.width);
+        let clamped_y = y.clamp(0.0, self.height);
+        let display_scale = Self::zoom_scale(self.zoom).max(1e-9);
+        let (center_world0_x, center_world0_y) = self.center_world0();
+
+        let marker_world0_x = center_world0_x + (clamped_x - self.width * 0.5) / display_scale;
+        let marker_world0_y = center_world0_y + (clamped_y - self.height * 0.5) / display_scale;
+        let (marker_lon, marker_lat) =
+            world_to_lon_lat(marker_world0_x, marker_world0_y, 0, self.tile_size);
+
+        self.location_marker = Some(LocationMarker {
+            lon: normalize_lon(marker_lon),
+            lat: clamp_lat(marker_lat),
+        });
+    }
+
     fn draw(&mut self, now_ms: f64) {
         self.last_frame_now_ms = now_ms;
         self.update_view_animation(now_ms);
@@ -865,6 +893,7 @@ impl EngineState {
         }
 
         self.draw_trajectory();
+        self.draw_location_marker();
     }
 
     fn draw_trajectory(&self) {
@@ -934,6 +963,55 @@ impl EngineState {
         self.ctx.set_fill_style_str(color);
         self.ctx.begin_path();
         let _ = self.ctx.arc(sx, sy, 5.0, 0.0, std::f64::consts::PI * 2.0);
+        self.ctx.fill();
+    }
+
+    fn draw_location_marker(&self) {
+        let Some(marker) = self.location_marker else {
+            return;
+        };
+
+        let display_scale = Self::zoom_scale(self.zoom);
+        let (center_world0_x, center_world0_y) = self.center_world0();
+        let (marker_world0_x, marker_world0_y) =
+            lon_lat_to_world(marker.lon, marker.lat, 0, self.tile_size);
+        let tip_x = (marker_world0_x - center_world0_x) * display_scale + self.width / 2.0;
+        let tip_y = (marker_world0_y - center_world0_y) * display_scale + self.height / 2.0;
+
+        const HEAD_RADIUS_PX: f64 = 8.0;
+        const HEAD_CENTER_OFFSET_Y_PX: f64 = 12.0;
+        const TAIL_HALF_WIDTH_PX: f64 = 5.0;
+
+        let head_center_x = tip_x;
+        let head_center_y = tip_y - HEAD_CENTER_OFFSET_Y_PX;
+        let tail_top_y = head_center_y + HEAD_RADIUS_PX - 1.0;
+
+        self.ctx.set_fill_style_str("#f97316");
+        self.ctx.begin_path();
+        let _ = self.ctx.arc(
+            head_center_x,
+            head_center_y,
+            HEAD_RADIUS_PX,
+            0.0,
+            std::f64::consts::PI * 2.0,
+        );
+        self.ctx.fill();
+
+        self.ctx.begin_path();
+        self.ctx.move_to(tip_x, tip_y);
+        self.ctx.line_to(tip_x - TAIL_HALF_WIDTH_PX, tail_top_y);
+        self.ctx.line_to(tip_x + TAIL_HALF_WIDTH_PX, tail_top_y);
+        self.ctx.fill();
+
+        self.ctx.set_fill_style_str("#fff7ed");
+        self.ctx.begin_path();
+        let _ = self.ctx.arc(
+            head_center_x,
+            head_center_y,
+            3.0,
+            0.0,
+            std::f64::consts::PI * 2.0,
+        );
         self.ctx.fill();
     }
 
@@ -1089,6 +1167,7 @@ pub fn init_engine(canvas_or_offscreen: JsValue, config: JsValue) -> Result<MapE
         tile_cache: HashMap::new(),
         pending_tiles: HashSet::new(),
         trajectories: Vec::new(),
+        location_marker: None,
         high_priority_queue: VecDeque::new(),
         medium_priority_queue: VecDeque::new(),
         low_priority_queue: VecDeque::new(),
@@ -1289,6 +1368,12 @@ impl MapEngine {
         );
     }
 
+    pub fn place_marker(&mut self, x: f32, y: f32) {
+        self.state
+            .borrow_mut()
+            .place_marker_at_screen(f64::from(x), f64::from(y));
+    }
+
     pub fn frame(&mut self, now_ms: f64) {
         {
             let mut state = self.state.borrow_mut();
@@ -1343,6 +1428,7 @@ impl MapEngine {
         state.bottom_void_color_rgb = None;
         state.view_animation = None;
         state.trajectories.clear();
+        state.location_marker = None;
         state.dragging = None;
     }
 }

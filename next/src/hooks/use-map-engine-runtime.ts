@@ -12,6 +12,7 @@ type MainThreadEngine = {
   wheel(deltaY: number, x: number, y: number, ctrlKey: boolean): void;
   set_view(lon: number, lat: number, zoom: number): void;
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
+  place_marker(x: number, y: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): unknown;
   clear_trajectory(): void;
@@ -118,6 +119,23 @@ export function useMapEngineRuntime({
       mainEngineRef.current?.zoom_to_box(startX, startY, endX, endY);
     },
     [sendToWorker]
+  );
+
+  const placeMarker = useCallback(
+    (x: number, y: number) => {
+      if (!canInteract) return;
+
+      if (runtimeModeRef.current === "worker") {
+        sendToWorker({
+          type: "PLACE_MARKER",
+          payload: { x, y }
+        });
+        return;
+      }
+
+      mainEngineRef.current?.place_marker(x, y);
+    },
+    [canInteract, sendToWorker]
   );
 
   const resizeEngine = useCallback(() => {
@@ -434,6 +452,7 @@ export function useMapEngineRuntime({
     sendPointerEvent,
     applyWheel,
     zoomToBox,
+    placeMarker,
     loadTrajectoryCsv,
     setTileUrlTemplate
   };

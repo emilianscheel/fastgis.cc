@@ -4,7 +4,7 @@ import type * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type PointerMessageType = "POINTER_DOWN" | "POINTER_MOVE" | "POINTER_UP";
-type ActiveTool = "pan" | "box-zoom";
+type ActiveTool = "pan" | "box-zoom" | "marker";
 type BoxZoomDrag = {
   startX: number;
   startY: number;
@@ -35,6 +35,7 @@ type UseBoxZoomToolOptions = {
     endX: number,
     endY: number
   ) => void;
+  onPlaceMarker: (x: number, y: number) => void;
 };
 
 const DEFAULT_MIN_SELECTION_PX = 12;
@@ -44,7 +45,8 @@ export function useBoxZoomTool({
   minSelectionSizePx = DEFAULT_MIN_SELECTION_PX,
   cancelWheelZoomAnimation,
   onPanPointerEvent,
-  onZoomToBox
+  onZoomToBox,
+  onPlaceMarker
 }: UseBoxZoomToolOptions) {
   const [activeTool, setActiveTool] = useState<ActiveTool>("pan");
   const [boxZoomDrag, setBoxZoomDrag] = useState<BoxZoomDrag | null>(null);
@@ -72,8 +74,18 @@ export function useBoxZoomTool({
         return;
       }
 
-      event.currentTarget.setPointerCapture(event.pointerId);
       const { x, y } = withCanvasPoint(event);
+
+      if (activeTool === "marker") {
+        cancelWheelZoomAnimation();
+        if (canInteract) {
+          onPlaceMarker(x, y);
+        }
+        setActiveTool("pan");
+        return;
+      }
+
+      event.currentTarget.setPointerCapture(event.pointerId);
 
       if (activeTool === "box-zoom") {
         cancelWheelZoomAnimation();
@@ -88,7 +100,14 @@ export function useBoxZoomTool({
 
       onPanPointerEvent("POINTER_DOWN", x, y, event.button);
     },
-    [activeTool, cancelWheelZoomAnimation, onPanPointerEvent, withCanvasPoint]
+    [
+      activeTool,
+      cancelWheelZoomAnimation,
+      canInteract,
+      onPanPointerEvent,
+      onPlaceMarker,
+      withCanvasPoint
+    ]
   );
 
   const handleCanvasPointerMove = useCallback(
@@ -178,7 +197,8 @@ export function useBoxZoomTool({
   }, [boxZoomDrag]);
 
   const isBoxZoomActive = activeTool === "box-zoom";
-  const canvasCursorClassName = isBoxZoomActive
+  const isMarkerActive = activeTool === "marker";
+  const canvasCursorClassName = isBoxZoomActive || isMarkerActive
     ? "cursor-crosshair"
     : "cursor-grab active:cursor-grabbing";
 
@@ -192,12 +212,24 @@ export function useBoxZoomTool({
     });
   }, [cancelWheelZoomAnimation]);
 
+  const toggleMarkerTool = useCallback(() => {
+    setActiveTool((current) => {
+      const next = current === "marker" ? "pan" : "marker";
+      if (next === "marker") {
+        cancelWheelZoomAnimation();
+      }
+      return next;
+    });
+  }, [cancelWheelZoomAnimation]);
+
   return {
     activeTool,
     isBoxZoomActive,
+    isMarkerActive,
     boxZoomRect,
     canvasCursorClassName,
     toggleBoxZoomTool,
+    toggleMarkerTool,
     handleCanvasPointerDown,
     handleCanvasPointerMove,
     handleCanvasPointerUp,

@@ -47,6 +47,13 @@ export class MapEngine {
     /**
      * @param {number} x
      * @param {number} y
+     */
+    place_marker(x, y) {
+        wasm.mapengine_place_marker(this.__wbg_ptr, x, y);
+    }
+    /**
+     * @param {number} x
+     * @param {number} y
      * @param {number} button
      */
     pointer_down(x, y, button) {

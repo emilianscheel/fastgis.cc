@@ -90,6 +90,7 @@ export function MapShell() {
     sendPointerEvent,
     applyWheel,
     zoomToBox,
+    placeMarker,
     loadTrajectoryCsv,
     setTileUrlTemplate
   } = useMapEngineRuntime({
@@ -122,9 +123,11 @@ export function MapShell() {
 
   const {
     isBoxZoomActive,
+    isMarkerActive,
     boxZoomRect,
     canvasCursorClassName,
     toggleBoxZoomTool,
+    toggleMarkerTool,
     handleCanvasPointerDown,
     handleCanvasPointerMove,
     handleCanvasPointerUp,
@@ -133,7 +136,8 @@ export function MapShell() {
     canInteract,
     cancelWheelZoomAnimation: stopZoomAnimation,
     onPanPointerEvent: sendPointerEvent,
-    onZoomToBox: handleZoomToBox
+    onZoomToBox: handleZoomToBox,
+    onPlaceMarker: placeMarker
   });
 
   const stepZoom = useCallback(
@@ -243,8 +247,10 @@ export function MapShell() {
         mapStyleId={mapStyleId}
         mapStyles={MAP_STYLES}
         isBoxZoomActive={isBoxZoomActive}
+        isMarkerActive={isMarkerActive}
         onMapStyleChange={handleMapStyleChange}
         onToggleBoxZoom={toggleBoxZoomTool}
+        onToggleMarker={toggleMarkerTool}
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
       />

@@ -10,6 +10,7 @@ type WasmMapEngine = {
   wheel(deltaY: number, x: number, y: number, ctrlKey: boolean): void;
   set_view(lon: number, lat: number, zoom: number): void;
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
+  place_marker(x: number, y: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
   clear_trajectory(): void;
@@ -141,6 +142,11 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
       message.payload.endX,
       message.payload.endY
     );
+    return;
+  }
+
+  if (message.type === "PLACE_MARKER") {
+    engine.place_marker(message.payload.x, message.payload.y);
     return;
   }
 
