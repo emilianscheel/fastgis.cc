@@ -23,6 +23,7 @@ const TILE_DRAW_OVERLAP_PX: f64 = 1.0;
 const MAX_IN_FLIGHT_REQUESTS: usize = 8;
 const VOID_COLOR_BLEND_ALPHA: f64 = 0.25;
 const BOX_ZOOM_FIT_PADDING: f64 = 0.9;
+const TRAJECTORY_FIT_PADDING: f64 = 0.8;
 const VIEW_ANIMATION_DURATION_MS: f64 = 300.0;
 
 #[wasm_bindgen(inline_js = r#"
@@ -824,19 +825,13 @@ impl EngineState {
         let top_world0 = center_world0_y + (top - self.height * 0.5) / current_display_scale;
         let bottom_world0 = center_world0_y + (bottom - self.height * 0.5) / current_display_scale;
 
-        let world_width = (right_world0 - left_world0).abs().max(1e-12);
-        let world_height = (bottom_world0 - top_world0).abs().max(1e-12);
-        let target_display_scale = ((self.width / world_width).min(self.height / world_height)
-            * BOX_ZOOM_FIT_PADDING)
-            .max(1e-9);
-        let target_zoom = self.zoom_clamp_f64(target_display_scale.log2());
-
-        let focus_world0_x = (left_world0 + right_world0) * 0.5;
-        let focus_world0_y = (top_world0 + bottom_world0) * 0.5;
-        let (target_lon, target_lat) =
-            world_to_lon_lat(focus_world0_x, focus_world0_y, 0, self.tile_size);
-
-        self.start_view_animation(target_lon, target_lat, target_zoom);
+        self.start_fit_to_world_bounds_animation(
+            left_world0,
+            top_world0,
+            right_world0,
+            bottom_world0,
+            BOX_ZOOM_FIT_PADDING,
+        );
     }
 
     fn draw(&mut self, now_ms: f64) {
@@ -942,37 +937,51 @@ impl EngineState {
         self.ctx.fill();
     }
 
-    fn fit_to_bounds(&mut self, bounds: Bounds) {
-        let viewport_width = self.width.max(1.0);
-        let viewport_height = self.height.max(1.0);
-        let padding = 0.8;
-
-        let center_lon = (bounds.min_lon + bounds.max_lon) / 2.0;
-        let center_lat = (bounds.min_lat + bounds.max_lat) / 2.0;
-
-        let (min_x_z0, min_y_z0) =
-            lon_lat_to_world(bounds.min_lon, bounds.max_lat, 0, self.tile_size);
-        let (max_x_z0, max_y_z0) =
-            lon_lat_to_world(bounds.max_lon, bounds.min_lat, 0, self.tile_size);
-        let width_z0 = (max_x_z0 - min_x_z0).abs().max(1e-9);
-        let height_z0 = (max_y_z0 - min_y_z0).abs().max(1e-9);
-
-        let mut best_zoom = self.min_zoom;
-        for z in (self.min_zoom..=self.max_zoom).rev() {
-            let scale = 2_f64.powi(i32::from(z));
-            let bw = width_z0 * scale;
-            let bh = height_z0 * scale;
-            if bw <= viewport_width * padding && bh <= viewport_height * padding {
-                best_zoom = z;
-                break;
-            }
+    fn start_fit_to_world_bounds_animation(
+        &mut self,
+        world0_x_a: f64,
+        world0_y_a: f64,
+        world0_x_b: f64,
+        world0_y_b: f64,
+        fit_padding: f64,
+    ) {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return;
         }
 
-        self.cancel_view_animation();
-        self.center_lon = normalize_lon(center_lon);
-        self.center_lat = clamp_lat(center_lat);
-        self.zoom = f64::from(best_zoom);
-        self.render_zoom = best_zoom;
+        let min_world0_x = world0_x_a.min(world0_x_b);
+        let max_world0_x = world0_x_a.max(world0_x_b);
+        let min_world0_y = world0_y_a.min(world0_y_b);
+        let max_world0_y = world0_y_a.max(world0_y_b);
+        let world_width = (max_world0_x - min_world0_x).max(1e-12);
+        let world_height = (max_world0_y - min_world0_y).max(1e-12);
+        let safe_fit_padding = fit_padding.clamp(0.05, 1.0);
+
+        let target_display_scale =
+            ((self.width / world_width).min(self.height / world_height) * safe_fit_padding)
+                .max(1e-9);
+        let target_zoom = self.zoom_clamp_f64(target_display_scale.log2());
+
+        let focus_world0_x = (min_world0_x + max_world0_x) * 0.5;
+        let focus_world0_y = (min_world0_y + max_world0_y) * 0.5;
+        let (target_lon, target_lat) =
+            world_to_lon_lat(focus_world0_x, focus_world0_y, 0, self.tile_size);
+
+        self.start_view_animation(target_lon, target_lat, target_zoom);
+    }
+
+    fn fit_to_bounds(&mut self, bounds: Bounds) {
+        let (world0_x_a, world0_y_a) =
+            lon_lat_to_world(bounds.min_lon, bounds.max_lat, 0, self.tile_size);
+        let (world0_x_b, world0_y_b) =
+            lon_lat_to_world(bounds.max_lon, bounds.min_lat, 0, self.tile_size);
+        self.start_fit_to_world_bounds_animation(
+            world0_x_a,
+            world0_y_a,
+            world0_x_b,
+            world0_y_b,
+            TRAJECTORY_FIT_PADDING,
+        );
     }
 
     fn tile_url(&self, key: TileKey) -> String {
