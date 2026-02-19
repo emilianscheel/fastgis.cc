@@ -18,3 +18,17 @@ wasm-pack build "$WASM_CRATE" \
   --out-dir "$OUT_DIR" \
   --out-name map_engine_wasm
 
+# Keep generated wasm artifacts committable for CI/Vercel builds that skip Rust tooling.
+cat > "$OUT_DIR/.gitignore" <<'EOF'
+*
+!.gitignore
+!.gitkeep
+!README.md
+!package.json
+!map_engine_wasm.js
+!map_engine_wasm.d.ts
+!map_engine_wasm_bg.wasm
+!map_engine_wasm_bg.wasm.d.ts
+!snippets/
+!snippets/**
+EOF
