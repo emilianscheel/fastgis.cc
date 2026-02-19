@@ -17,7 +17,7 @@ use web_sys::{
 };
 
 static PANIC_HOOK: Once = Once::new();
-const WHEEL_ZOOM_SENSITIVITY: f64 = 1.0 / 3000.0;
+const WHEEL_ZOOM_SENSITIVITY: f64 = 1.0 / 1200.0;
 const TILE_PREFETCH_MARGIN: i32 = 1;
 const TILE_DRAW_OVERLAP_PX: f64 = 1.0;
 const MAX_IN_FLIGHT_REQUESTS: usize = 8;
@@ -100,7 +100,7 @@ impl Default for InitConfig {
             min_zoom: Some(0),
             max_zoom: Some(19),
             tile_size: Some(256),
-            cache_size: Some(256),
+            cache_size: Some(1024),
         }
     }
 }
@@ -329,6 +329,33 @@ struct EngineState {
 }
 
 impl EngineState {
+    fn relevant_zoom_bounds(&self) -> (u8, u8) {
+        let min_relevant = self.render_zoom.saturating_sub(1);
+        let max_relevant = self.render_zoom.saturating_add(1).min(self.max_zoom);
+        (min_relevant, max_relevant)
+    }
+
+    fn is_zoom_relevant_for_view(&self, z: u8) -> bool {
+        let (min_relevant, max_relevant) = self.relevant_zoom_bounds();
+        z >= min_relevant && z <= max_relevant
+    }
+
+    fn pop_latest_relevant_request(
+        queue: &mut VecDeque<TileKey>,
+        pending_tiles: &mut HashSet<TileKey>,
+        min_relevant_zoom: u8,
+        max_relevant_zoom: u8,
+    ) -> Option<TileKey> {
+        while let Some(key) = queue.pop_back() {
+            if key.z >= min_relevant_zoom && key.z <= max_relevant_zoom {
+                return Some(key);
+            }
+            pending_tiles.remove(&key);
+        }
+
+        None
+    }
+
     fn zoom_clamp_f64(&self, zoom: f64) -> f64 {
         zoom.clamp(f64::from(self.min_zoom), f64::from(self.max_zoom))
     }
@@ -567,13 +594,30 @@ impl EngineState {
     }
 
     fn dequeue_next_request(&mut self) -> Option<TileKey> {
-        if let Some(key) = self.high_priority_queue.pop_front() {
+        let (min_relevant_zoom, max_relevant_zoom) = self.relevant_zoom_bounds();
+
+        if let Some(key) = Self::pop_latest_relevant_request(
+            &mut self.high_priority_queue,
+            &mut self.pending_tiles,
+            min_relevant_zoom,
+            max_relevant_zoom,
+        ) {
             return Some(key);
         }
-        if let Some(key) = self.medium_priority_queue.pop_front() {
+        if let Some(key) = Self::pop_latest_relevant_request(
+            &mut self.medium_priority_queue,
+            &mut self.pending_tiles,
+            min_relevant_zoom,
+            max_relevant_zoom,
+        ) {
             return Some(key);
         }
-        self.low_priority_queue.pop_front()
+        Self::pop_latest_relevant_request(
+            &mut self.low_priority_queue,
+            &mut self.pending_tiles,
+            min_relevant_zoom,
+            max_relevant_zoom,
+        )
     }
 
     fn draw_tiles_level(&mut self, z: u8) {
@@ -810,6 +854,10 @@ impl EngineState {
     }
 
     fn set_tile_url_template(&mut self, template: String) {
+        if self.tile_url_template == template {
+            return;
+        }
+
         self.tile_url_template = template;
         self.pending_tiles.clear();
         self.high_priority_queue.clear();
@@ -874,7 +922,7 @@ pub fn init_engine(canvas_or_offscreen: JsValue, config: JsValue) -> Result<MapE
     let min_zoom = config.min_zoom.unwrap_or(0);
     let max_zoom = config.max_zoom.unwrap_or(19).max(min_zoom);
     let tile_size = config.tile_size.unwrap_or(256).max(64);
-    let cache_limit = config.cache_size.unwrap_or(256).max(64);
+    let cache_limit = config.cache_size.unwrap_or(1024).max(64);
     let initial_zoom = 2.0_f64.clamp(f64::from(min_zoom), f64::from(max_zoom));
     let initial_render_zoom = initial_zoom.round() as u8;
 
@@ -963,12 +1011,13 @@ fn request_tile(state: Rc<RefCell<EngineState>>, key: TileKey, url: String) {
             state_mut.in_flight_requests = state_mut.in_flight_requests.saturating_sub(1);
 
             let is_current_source = state_mut.tile_url(key) == request_url;
-            if is_current_source {
+            let is_relevant_zoom = state_mut.is_zoom_relevant_for_view(key.z);
+            if is_current_source && is_relevant_zoom {
                 if let Ok(bitmap) = result {
                     state_mut.insert_tile(key, bitmap, edge_sample);
                 }
             } else if result.is_ok() {
-                // Drop stale tile responses after style switches.
+                // Drop stale tile responses after style switches or fast zoom jumps.
             }
         }
 

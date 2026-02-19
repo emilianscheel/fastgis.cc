@@ -42,9 +42,9 @@ type MapStyle = {
 
 const MAP_STYLES: MapStyle[] = [
   {
-    id: "osm-standard",
-    label: "OSM Standard",
-    tileUrlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    id: "osm-fr-hot",
+    label: "OpenStreetMap France HOT",
+    tileUrlTemplate: "https://a.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
   },
   {
     id: "carto-light",
@@ -62,7 +62,7 @@ const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
   minZoom: 0,
   maxZoom: 19,
   tileSize: 256,
-  cacheSize: 256
+  cacheSize: 2048
 };
 
 export function MapShell() {
@@ -77,8 +77,9 @@ export function MapShell() {
 
   const [status, setStatus] = useState<Status>("loading");
   const [canvasInstance, setCanvasInstance] = useState(0);
-  const [mapStyleId, setMapStyleId] = useState<MapStyle["id"]>("osm-standard");
+  const [mapStyleId, setMapStyleId] = useState<MapStyle["id"]>("osm-fr-hot");
   const tileUrlTemplateRef = useRef(MAP_STYLES[0].tileUrlTemplate);
+  const activeTileTemplateRef = useRef(MAP_STYLES[0].tileUrlTemplate);
 
   const canInteract = status === "ready";
   const selectedMapStyle = useMemo(
@@ -463,15 +464,21 @@ export function MapShell() {
     if (!canInteract) return;
 
     const tileUrlTemplate = selectedMapStyle.tileUrlTemplate;
+    if (tileUrlTemplate === activeTileTemplateRef.current) {
+      return;
+    }
+
     if (runtimeModeRef.current === "worker") {
       sendToWorker({
         type: "SET_TILE_URL_TEMPLATE",
         payload: { tileUrlTemplate }
       });
+      activeTileTemplateRef.current = tileUrlTemplate;
       return;
     }
 
     mainEngineRef.current?.set_tile_url_template(tileUrlTemplate);
+    activeTileTemplateRef.current = tileUrlTemplate;
   }, [canInteract, selectedMapStyle, sendToWorker]);
 
   useEffect(() => {
