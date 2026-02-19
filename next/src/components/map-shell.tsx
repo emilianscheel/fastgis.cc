@@ -4,6 +4,9 @@ import type * as React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Minus, Plus } from "lucide-react";
 
+import { CsvDropOverlay } from "@/components/csv-drop-overlay";
+import { Button } from "@/components/ui/button";
+import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
 import type { InitConfig, WorkerInMessage, WorkerOutMessage } from "@/lib/map-protocol";
 
 type MainThreadEngine = {
@@ -33,7 +36,6 @@ const MAP_CONFIG: InitConfig = {
 export function MapShell() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const workerReadyRef = useRef(false);
   const mainEngineRef = useRef<MainThreadEngine | null>(null);
@@ -374,6 +376,16 @@ export function MapShell() {
     [canInteract, handleCsvBytes]
   );
 
+  const handleDroppedFiles = useCallback(
+    async (files: File[]) => {
+      if (!canInteract) return;
+      for (const file of files) {
+        await handleFile(file);
+      }
+    },
+    [canInteract, handleFile]
+  );
+
   const stepZoom = useCallback(
     (direction: "in" | "out") => {
       if (!canInteract) return;
@@ -383,6 +395,20 @@ export function MapShell() {
     },
     [applyWheel, canInteract, viewportSize]
   );
+
+  const handleZoomIn = useCallback(() => {
+    stepZoom("in");
+  }, [stepZoom]);
+
+  const handleZoomOut = useCallback(() => {
+    stepZoom("out");
+  }, [stepZoom]);
+
+  useZoomShortcuts({
+    enabled: canInteract,
+    onZoomIn: handleZoomIn,
+    onZoomOut: handleZoomOut
+  });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -426,51 +452,34 @@ export function MapShell() {
           }}
         />
       </div>
+      <CsvDropOverlay enabled={canInteract} onDropFiles={handleDroppedFiles} />
 
       <div className="pointer-events-none fixed inset-x-0 top-0 z-20">
         <div className="pointer-events-auto flex w-full items-center justify-between border-b border-black/15 bg-white/80 px-4 py-2 backdrop-blur-md">
+          <div />
           <div className="flex items-center gap-2">
-            <button
+            <Button
               type="button"
-              className="h-9 rounded-none border border-black/20 bg-white px-3 text-sm font-medium text-black transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={!canInteract}
-            >
-              Select CSV file
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,text/csv"
-              className="hidden"
-              onChange={async (event) => {
-                const inputEl = event.currentTarget;
-                const file = inputEl.files?.[0];
-                if (!file) return;
-                await handleFile(file);
-                inputEl.value = "";
-              }}
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              className="flex h-9 w-9 items-center justify-center rounded-none border border-black/20 bg-white text-black transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={() => stepZoom("in")}
+              variant="outline"
+              size="sm"
+              className="h-9 w-9 rounded-none border-black/20 bg-white p-0 text-black hover:bg-black/[0.04]"
+              onClick={handleZoomIn}
               disabled={!canInteract}
               aria-label="Zoom in"
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="flex h-9 w-9 items-center justify-center rounded-none border border-black/20 bg-white text-black transition hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={() => stepZoom("out")}
+              variant="outline"
+              size="sm"
+              className="h-9 w-9 rounded-none border-black/20 bg-white p-0 text-black hover:bg-black/[0.04]"
+              onClick={handleZoomOut}
               disabled={!canInteract}
               aria-label="Zoom out"
             >
               <Minus className="h-4 w-4" aria-hidden="true" />
-            </button>
+            </Button>
           </div>
         </div>
       </div>
