@@ -326,7 +326,7 @@ export function MapShell() {
   ]);
 
   const withCanvasPoint = useCallback(
-    (event: React.PointerEvent<HTMLCanvasElement> | React.WheelEvent<HTMLCanvasElement>) => {
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
       const rect = event.currentTarget.getBoundingClientRect();
       return {
         x: event.clientX - rect.left,
@@ -384,6 +384,24 @@ export function MapShell() {
     [applyWheel, canInteract, viewportSize]
   );
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      applyWheel(event.deltaY, x, y);
+    };
+
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener("wheel", handleWheel);
+    };
+  }, [applyWheel, canvasInstance]);
+
   return (
     <main className="fixed inset-0 h-screen w-screen overflow-hidden bg-black">
       <div ref={stageRef} className="absolute inset-0">
@@ -405,11 +423,6 @@ export function MapShell() {
             event.currentTarget.releasePointerCapture(event.pointerId);
             const { x, y } = withCanvasPoint(event);
             sendPointerEvent("POINTER_UP", x, y, event.button);
-          }}
-          onWheel={(event) => {
-            event.preventDefault();
-            const { x, y } = withCanvasPoint(event);
-            applyWheel(event.deltaY, x, y);
           }}
         />
       </div>
