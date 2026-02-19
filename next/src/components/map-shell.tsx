@@ -68,6 +68,8 @@ const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
   tileSize: 256,
   cacheSize: 2048
 };
+const ZOOM_STEP_DELTA = 1200;
+const ZOOM_STEP_ANIMATION_MS = 300;
 
 function mapStyleForTheme(theme?: string): MapStyle["id"] {
   return theme === "dark" ? DARK_THEME_MAP_STYLE_ID : LIGHT_THEME_MAP_STYLE_ID;
@@ -86,6 +88,7 @@ export function MapShell() {
   const mainEngineRef = useRef<MainThreadEngine | null>(null);
   const runtimeModeRef = useRef<RuntimeMode>("none");
   const rafRef = useRef<number | null>(null);
+  const zoomAnimationRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
   const [status, setStatus] = useState<Status>("loading");
@@ -210,6 +213,13 @@ export function MapShell() {
     if (rafRef.current !== null) {
       window.cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
+    }
+  }, []);
+
+  const stopZoomAnimation = useCallback(() => {
+    if (zoomAnimationRef.current !== null) {
+      window.cancelAnimationFrame(zoomAnimationRef.current);
+      zoomAnimationRef.current = null;
     }
   }, []);
 
@@ -387,6 +397,7 @@ export function MapShell() {
 
     return () => {
       cancelled = true;
+      stopZoomAnimation();
       stopFrameLoop();
       window.removeEventListener("resize", resizeEngine);
       resizeObserverRef.current?.disconnect();
@@ -403,6 +414,7 @@ export function MapShell() {
     initMainThreadEngine,
     resizeEngine,
     startFrameLoop,
+    stopZoomAnimation,
     stopFrameLoop,
     teardownWorker,
     viewportSize
@@ -470,11 +482,36 @@ export function MapShell() {
   const stepZoom = useCallback(
     (direction: "in" | "out") => {
       if (!canInteract) return;
+
+      stopZoomAnimation();
+
       const { width, height } = viewportSize();
-      const deltaY = direction === "in" ? -1200 : 1200;
-      applyWheel(deltaY, width / 2, height / 2);
+      const centerX = width / 2;
+      const centerY = height / 2;
+      const targetDelta = direction === "in" ? -ZOOM_STEP_DELTA : ZOOM_STEP_DELTA;
+      const startTime = performance.now();
+      let lastEasedProgress = 0;
+
+      const tick = (now: number) => {
+        const elapsed = now - startTime;
+        const progress = Math.min(1, elapsed / ZOOM_STEP_ANIMATION_MS);
+        const easedProgress = 1 - Math.pow(1 - progress, 3);
+        const frameDelta = (easedProgress - lastEasedProgress) * targetDelta;
+        lastEasedProgress = easedProgress;
+
+        applyWheel(frameDelta, centerX, centerY);
+
+        if (progress < 1) {
+          zoomAnimationRef.current = window.requestAnimationFrame(tick);
+          return;
+        }
+
+        zoomAnimationRef.current = null;
+      };
+
+      zoomAnimationRef.current = window.requestAnimationFrame(tick);
     },
-    [applyWheel, canInteract, viewportSize]
+    [applyWheel, canInteract, stopZoomAnimation, viewportSize]
   );
 
   const handleZoomIn = useCallback(() => {

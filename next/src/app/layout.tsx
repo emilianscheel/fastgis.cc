@@ -6,19 +6,29 @@ import { ThemeProvider } from "@/components/theme-provider";
 
 const spaceGrotesk = Space_Grotesk({
   subsets: ["latin"],
-  variable: "--font-space-grotesk"
+  variable: "--font-space-grotesk",
 });
 
 export const metadata: Metadata = {
-  title: "QGIS Rust Web MVP",
-  description: "Rust/WASM map rendering with a React shell"
+  title: "fastgis.cc",
+  description:
+    "Rust/WASM map rendering with a React shell in a bun-native next.js project",
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${spaceGrotesk.variable} font-[var(--font-space-grotesk)]`}>
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+      <body
+        className={`${spaceGrotesk.variable} font-[var(--font-space-grotesk)]`}
+      >
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
           {children}
         </ThemeProvider>
       </body>
