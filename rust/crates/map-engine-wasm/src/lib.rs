@@ -888,11 +888,7 @@ impl EngineState {
         let (marker_lon, marker_lat) =
             world_to_lon_lat(marker_world0_x, marker_world0_y, 0, self.tile_size);
 
-        let placed_marker = LocationMarker {
-            lon: normalize_lon(marker_lon),
-            lat: clamp_lat(marker_lat),
-        };
-        self.location_markers.push(placed_marker);
+        let placed_marker = self.push_marker_lon_lat(marker_lon, marker_lat);
 
         Some(PlacedMarker {
             lon: placed_marker.lon,
@@ -909,6 +905,28 @@ impl EngineState {
 
         let keep_len = self.location_markers.len().saturating_sub(count);
         self.location_markers.truncate(keep_len);
+    }
+
+    fn push_marker_lon_lat(&mut self, lon: f64, lat: f64) -> LocationMarker {
+        let marker = LocationMarker {
+            lon: normalize_lon(lon),
+            lat: clamp_lat(lat),
+        };
+        self.location_markers.push(marker);
+        marker
+    }
+
+    fn remove_marker_lon_lat(&mut self, lon: f64, lat: f64) {
+        let normalized_lon = normalize_lon(lon);
+        let clamped_lat = clamp_lat(lat);
+        const COORD_MATCH_EPSILON: f64 = 1e-6;
+
+        if let Some(index) = self.location_markers.iter().rposition(|marker| {
+            (marker.lon - normalized_lon).abs() <= COORD_MATCH_EPSILON
+                && (marker.lat - clamped_lat).abs() <= COORD_MATCH_EPSILON
+        }) {
+            self.location_markers.remove(index);
+        }
     }
 
     fn draw(&mut self, now_ms: f64) {
@@ -1522,6 +1540,14 @@ impl MapEngine {
             .state
             .borrow_mut()
             .place_marker_at_screen(f64::from(x), f64::from(y));
+    }
+
+    pub fn add_marker_lon_lat(&mut self, lon: f64, lat: f64) {
+        self.state.borrow_mut().push_marker_lon_lat(lon, lat);
+    }
+
+    pub fn remove_marker_lon_lat(&mut self, lon: f64, lat: f64) {
+        self.state.borrow_mut().remove_marker_lon_lat(lon, lat);
     }
 
     pub fn place_marker_with_info(&mut self, x: f32, y: f32) -> Result<JsValue, JsValue> {

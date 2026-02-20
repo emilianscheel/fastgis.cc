@@ -5,9 +5,14 @@ import { useTheme } from "next-themes";
 import { toast } from "sonner";
 
 import { CsvDropOverlay } from "@/components/csv-drop-overlay";
-import { MapCanvasStage, type MeasurementSegmentOverlay } from "@/components/map/map-canvas-stage";
+import {
+  MapCanvasStage,
+  type MeasurementMarkerOverlay,
+  type MeasurementSegmentOverlay
+} from "@/components/map/map-canvas-stage";
 import { MapToolbar, type MapStyleOption } from "@/components/map/map-toolbar";
 import { Kbd } from "@/components/ui/kbd";
+import { SonnerGroupedPills } from "@/components/ui/sonner";
 import { useBoxZoomTool } from "@/hooks/use-box-zoom-tool";
 import { useMapEngineRuntime } from "@/hooks/use-map-engine-runtime";
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
@@ -56,6 +61,7 @@ const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
 const ZOOM_STEP_DELTA = 1200;
 const ZOOM_STEP_ANIMATION_MS = 300;
 const EARTH_RADIUS_METERS = 6_371_000;
+const MARKER_COORDINATE_MATCH_EPSILON = 1e-9;
 const MEASUREMENT_GUIDANCE_TOAST_ID = "measure-distance-guidance";
 const COPIED_DISTANCE_TOAST_ID = "measure-distance-copy";
 
@@ -151,6 +157,8 @@ export function MapShell() {
     zoomToBox,
     placeMarker,
     placeMarkerWithInfo,
+    addMarkerAtLonLat,
+    removeMarkerByLonLat,
     projectLonLat,
     removeRecentMarkers,
     hoverMarkerAtPoint,
@@ -190,6 +198,7 @@ export function MapShell() {
   const measurementSessionIdRef = useRef(0);
   const isMeasurementActiveRef = useRef(false);
   const wasMeasurementActiveRef = useRef(false);
+  const measurementPointsRef = useRef<PlacedMarker[]>([]);
 
   const handlePlaceMeasurement = useCallback(
     (x: number, y: number) => {
@@ -207,22 +216,28 @@ export function MapShell() {
           return;
         }
 
-        setMeasurementPoints((current) => [...current, marker]);
+        setMeasurementPoints((current) => {
+          const next = [...current, marker];
+          measurementPointsRef.current = next;
+          return next;
+        });
       })();
     },
     [placeMarkerWithInfo]
   );
 
   const finishMeasurement = useCallback(() => {
+    const currentPoints = measurementPointsRef.current;
     measurementSessionIdRef.current += 1;
 
-    if (measurementPoints.length > 0) {
-      removeRecentMarkers(measurementPoints.length);
+    if (currentPoints.length > 0) {
+      removeRecentMarkers(currentPoints.length);
     }
 
+    measurementPointsRef.current = [];
     setMeasurementPoints([]);
     setMeasurementRenderPoints([]);
-  }, [measurementPoints.length, removeRecentMarkers]);
+  }, [removeRecentMarkers]);
 
   const {
     isBoxZoomActive,
@@ -264,6 +279,10 @@ export function MapShell() {
   }, [finishMeasurement, isMeasurementActive]);
 
   useEffect(() => {
+    measurementPointsRef.current = measurementPoints;
+  }, [measurementPoints]);
+
+  useEffect(() => {
     return () => {
       toast.dismiss(MEASUREMENT_GUIDANCE_TOAST_ID);
     };
@@ -299,6 +318,36 @@ export function MapShell() {
       console.error("Failed to copy marker coordinates.", error);
     }
   }, []);
+
+  const handleMarkerHoverRemove = useCallback(
+    (marker: { lat: number; lon: number }) => {
+      removeMarkerByLonLat(marker.lon, marker.lat);
+      clearMarkerHover();
+    },
+    [clearMarkerHover, removeMarkerByLonLat]
+  );
+
+  const handleRemoveMeasurementMarker = useCallback(
+    (markerIndex: number) => {
+      const currentPoints = measurementPointsRef.current;
+      if (markerIndex < 0 || markerIndex >= currentPoints.length) {
+        return;
+      }
+
+      const nextPoints = currentPoints.filter((_, index) => index !== markerIndex);
+      measurementSessionIdRef.current += 1;
+
+      removeRecentMarkers(currentPoints.length);
+      for (const marker of nextPoints) {
+        addMarkerAtLonLat(marker.lon, marker.lat);
+      }
+
+      measurementPointsRef.current = nextPoints;
+      setMeasurementPoints(nextPoints);
+      setMeasurementRenderPoints([]);
+    },
+    [addMarkerAtLonLat, removeRecentMarkers]
+  );
 
   useEffect(() => {
     if (measurementPoints.length === 0) {
@@ -380,6 +429,41 @@ export function MapShell() {
     return { segments, totalDistanceMeters };
   }, [measurementPoints, measurementRenderPoints]);
 
+  const measurementMarkers = useMemo<MeasurementMarkerOverlay[]>(
+    () =>
+      measurementPoints.map((marker, index) => {
+        const renderPoint = measurementRenderPoints[index] ?? {
+          screenX: marker.tipScreenX,
+          screenY: marker.tipScreenY
+        };
+
+        return {
+          index,
+          lat: marker.lat,
+          lon: marker.lon,
+          screenX: renderPoint.screenX,
+          screenY: renderPoint.screenY
+        };
+      }),
+    [measurementPoints, measurementRenderPoints]
+  );
+
+  const hoveredMeasurementMarkerIndex = useMemo<number | null>(() => {
+    if (!isMeasurementActive || !markerHover) {
+      return null;
+    }
+
+    for (const marker of measurementMarkers) {
+      const lonDelta = Math.abs(marker.lon - markerHover.lon);
+      const latDelta = Math.abs(marker.lat - markerHover.lat);
+      if (lonDelta <= MARKER_COORDINATE_MATCH_EPSILON && latDelta <= MARKER_COORDINATE_MATCH_EPSILON) {
+        return marker.index;
+      }
+    }
+
+    return null;
+  }, [isMeasurementActive, markerHover, measurementMarkers]);
+
   useEffect(() => {
     if (!isMeasurementActive) {
       return;
@@ -387,14 +471,27 @@ export function MapShell() {
 
     const prompt = measurementPromptText(measurementPoints.length);
     appToast.show(
-      <span className="inline-flex items-baseline gap-1">
-        <span>{prompt}</span>
-        <span className="font-mono tabular-nums">{formatDistanceMeters(totalDistanceMeters)}</span>
-        <span className="inline-flex items-center gap-1">
-          <Kbd className="h-4 px-1 text-[10px]">Enter</Kbd>
-          <span>finishes measurement</span>
-        </span>
-      </span>,
+      <SonnerGroupedPills
+        parts={[
+          {
+            key: "prompt",
+            content: <span>{prompt}</span>
+          },
+          {
+            key: "distance",
+            content: <span className="font-mono tabular-nums">{formatDistanceMeters(totalDistanceMeters)}</span>
+          },
+          {
+            key: "finish",
+            content: (
+              <span className="inline-flex items-center gap-1">
+                <Kbd className="h-4 px-1 text-[10px]">Enter</Kbd>
+                <span>finishes measurement</span>
+              </span>
+            )
+          }
+        ]}
+      />,
       {
         id: MEASUREMENT_GUIDANCE_TOAST_ID,
         duration: Number.POSITIVE_INFINITY,
@@ -519,8 +616,10 @@ export function MapShell() {
         canvasKey={canvasInstance}
         cursorClassName={canvasCursorClassName}
         boxZoomRect={boxZoomRect}
-        markerHover={isMeasurementActive ? null : markerHover}
+        markerHover={markerHover}
         isMeasurementActive={isMeasurementActive}
+        hoveredMeasurementMarkerIndex={hoveredMeasurementMarkerIndex}
+        measurementMarkers={measurementMarkers}
         measurementSegments={measurementSegments}
         onPointerDown={handleCanvasPointerDown}
         onPointerMove={handleCanvasPointerMove}
@@ -528,6 +627,9 @@ export function MapShell() {
         onPointerCancel={handleCanvasPointerCancel}
         onPointerLeave={handleCanvasPointerLeave}
         onMarkerHoverCopy={handleMarkerHoverCopy}
+        onMarkerHoverRemove={handleMarkerHoverRemove}
+        onMeasurementMarkerCopy={handleMarkerHoverCopy}
+        onRemoveMeasurementMarker={handleRemoveMeasurementMarker}
         onMeasurementDistanceCopy={handleMeasurementDistanceCopy}
       />
       <CsvDropOverlay enabled={canInteract} onDropFiles={handleDroppedFiles} />

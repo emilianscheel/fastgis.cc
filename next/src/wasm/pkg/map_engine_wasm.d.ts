@@ -5,6 +5,7 @@ export class MapEngine {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    add_marker_lon_lat(lon: number, lat: number): void;
     clear_trajectory(): void;
     destroy(): void;
     frame(now_ms: number): void;
@@ -16,6 +17,7 @@ export class MapEngine {
     pointer_move(x: number, y: number): void;
     pointer_up(_x: number, _y: number): void;
     project_lon_lat(lon: number, lat: number): any;
+    remove_marker_lon_lat(lon: number, lat: number): void;
     remove_recent_markers(count: number): void;
     resize(width: number, height: number, dpr: number): void;
     set_tile_url_template(template: string): void;
@@ -32,6 +34,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_mapengine_free: (a: number, b: number) => void;
     readonly init_engine: (a: any, b: any) => [number, number, number];
+    readonly mapengine_add_marker_lon_lat: (a: number, b: number, c: number) => void;
     readonly mapengine_clear_trajectory: (a: number) => void;
     readonly mapengine_destroy: (a: number) => void;
     readonly mapengine_frame: (a: number, b: number) => void;
@@ -43,6 +46,7 @@ export interface InitOutput {
     readonly mapengine_pointer_move: (a: number, b: number, c: number) => void;
     readonly mapengine_pointer_up: (a: number, b: number, c: number) => void;
     readonly mapengine_project_lon_lat: (a: number, b: number, c: number) => [number, number, number];
+    readonly mapengine_remove_marker_lon_lat: (a: number, b: number, c: number) => void;
     readonly mapengine_remove_recent_markers: (a: number, b: number) => void;
     readonly mapengine_resize: (a: number, b: number, c: number, d: number) => void;
     readonly mapengine_set_tile_url_template: (a: number, b: number, c: number) => void;

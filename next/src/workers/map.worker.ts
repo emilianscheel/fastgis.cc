@@ -19,6 +19,8 @@ type WasmMapEngine = {
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   place_marker(x: number, y: number): void;
   place_marker_with_info(x: number, y: number): PlacedMarker | null;
+  add_marker_lon_lat(lon: number, lat: number): void;
+  remove_marker_lon_lat(lon: number, lat: number): void;
   hit_test_marker(x: number, y: number): MarkerHover | null;
   project_lon_lat(lon: number, lat: number): ProjectedPoint | null;
   remove_recent_markers(count: number): void;
@@ -179,6 +181,16 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
 
   if (message.type === "PLACE_MARKER") {
     engine.place_marker(message.payload.x, message.payload.y);
+    return;
+  }
+
+  if (message.type === "ADD_MARKER_LON_LAT") {
+    engine.add_marker_lon_lat(message.payload.lon, message.payload.lat);
+    return;
+  }
+
+  if (message.type === "REMOVE_MARKER_LON_LAT") {
+    engine.remove_marker_lon_lat(message.payload.lon, message.payload.lat);
     return;
   }
 

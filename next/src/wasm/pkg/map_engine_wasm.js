@@ -19,6 +19,13 @@ export class MapEngine {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_mapengine_free(ptr, 0);
     }
+    /**
+     * @param {number} lon
+     * @param {number} lat
+     */
+    add_marker_lon_lat(lon, lat) {
+        wasm.mapengine_add_marker_lon_lat(this.__wbg_ptr, lon, lat);
+    }
     clear_trajectory() {
         wasm.mapengine_clear_trajectory(this.__wbg_ptr);
     }
@@ -108,6 +115,13 @@ export class MapEngine {
             throw takeFromExternrefTable0(ret[1]);
         }
         return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} lon
+     * @param {number} lat
+     */
+    remove_marker_lon_lat(lon, lat) {
+        wasm.mapengine_remove_marker_lon_lat(this.__wbg_ptr, lon, lat);
     }
     /**
      * @param {number} count

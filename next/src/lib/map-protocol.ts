@@ -124,6 +124,20 @@ export type WorkerInMessage =
       };
     }
   | {
+      type: "ADD_MARKER_LON_LAT";
+      payload: {
+        lon: number;
+        lat: number;
+      };
+    }
+  | {
+      type: "REMOVE_MARKER_LON_LAT";
+      payload: {
+        lon: number;
+        lat: number;
+      };
+    }
+  | {
       type: "REMOVE_RECENT_MARKERS";
       payload: {
         count: number;

@@ -157,7 +157,7 @@ export function useBoxZoomTool({
       }
 
       if (interactionTool === "measure") {
-        onHoverClear();
+        onHoverPoint(x, y);
         return;
       }
 

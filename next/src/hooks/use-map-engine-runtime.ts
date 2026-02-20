@@ -21,6 +21,8 @@ type MainThreadEngine = {
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   place_marker(x: number, y: number): void;
   place_marker_with_info(x: number, y: number): PlacedMarker | null;
+  add_marker_lon_lat(lon: number, lat: number): void;
+  remove_marker_lon_lat(lon: number, lat: number): void;
   hit_test_marker(x: number, y: number): MarkerHover | null;
   project_lon_lat(lon: number, lat: number): ProjectedPoint | null;
   remove_recent_markers(count: number): void;
@@ -189,6 +191,50 @@ export function useMapEngineRuntime({
         console.error(error);
         return Promise.resolve(null);
       }
+    },
+    [canInteract, sendToWorker]
+  );
+
+  const addMarkerAtLonLat = useCallback(
+    (lon: number, lat: number) => {
+      if (!canInteract) {
+        return;
+      }
+
+      if (runtimeModeRef.current === "worker") {
+        sendToWorker({
+          type: "ADD_MARKER_LON_LAT",
+          payload: {
+            lon,
+            lat
+          }
+        });
+        return;
+      }
+
+      mainEngineRef.current?.add_marker_lon_lat(lon, lat);
+    },
+    [canInteract, sendToWorker]
+  );
+
+  const removeMarkerByLonLat = useCallback(
+    (lon: number, lat: number) => {
+      if (!canInteract) {
+        return;
+      }
+
+      if (runtimeModeRef.current === "worker") {
+        sendToWorker({
+          type: "REMOVE_MARKER_LON_LAT",
+          payload: {
+            lon,
+            lat
+          }
+        });
+        return;
+      }
+
+      mainEngineRef.current?.remove_marker_lon_lat(lon, lat);
     },
     [canInteract, sendToWorker]
   );
@@ -661,6 +707,8 @@ export function useMapEngineRuntime({
     zoomToBox,
     placeMarker,
     placeMarkerWithInfo,
+    addMarkerAtLonLat,
+    removeMarkerByLonLat,
     projectLonLat,
     removeRecentMarkers,
     hoverMarkerAtPoint,

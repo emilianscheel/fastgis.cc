@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_mapengine_free: (a: number, b: number) => void;
 export const init_engine: (a: any, b: any) => [number, number, number];
+export const mapengine_add_marker_lon_lat: (a: number, b: number, c: number) => void;
 export const mapengine_clear_trajectory: (a: number) => void;
 export const mapengine_destroy: (a: number) => void;
 export const mapengine_frame: (a: number, b: number) => void;
@@ -14,6 +15,7 @@ export const mapengine_pointer_down: (a: number, b: number, c: number, d: number
 export const mapengine_pointer_move: (a: number, b: number, c: number) => void;
 export const mapengine_pointer_up: (a: number, b: number, c: number) => void;
 export const mapengine_project_lon_lat: (a: number, b: number, c: number) => [number, number, number];
+export const mapengine_remove_marker_lon_lat: (a: number, b: number, c: number) => void;
 export const mapengine_remove_recent_markers: (a: number, b: number) => void;
 export const mapengine_resize: (a: number, b: number, c: number, d: number) => void;
 export const mapengine_set_tile_url_template: (a: number, b: number, c: number) => void;
