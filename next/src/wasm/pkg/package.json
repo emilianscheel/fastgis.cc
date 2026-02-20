@@ -1,7 +1,13 @@
 {
   "name": "map-engine-wasm",
   "type": "module",
+  "description": "WASM map rendering engine for fastgis.cc",
   "version": "0.1.0",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/emilianscheel/fastgis.cc"
+  },
   "files": [
     "map_engine_wasm_bg.wasm",
     "map_engine_wasm.js",

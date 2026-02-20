@@ -2,7 +2,9 @@
 name = "map-core"
 version = "0.1.0"
 edition = "2021"
+description = "Core Mercator and trajectory logic for fastgis.cc"
+repository = "https://github.com/emilianscheel/fastgis.cc"
+license = "UNLICENSED"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-

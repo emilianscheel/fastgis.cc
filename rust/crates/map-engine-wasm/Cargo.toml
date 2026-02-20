@@ -2,6 +2,9 @@
 name = "map-engine-wasm"
 version = "0.1.0"
 edition = "2021"
+description = "WASM map rendering engine for fastgis.cc"
+repository = "https://github.com/emilianscheel/fastgis.cc"
+license = "UNLICENSED"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
