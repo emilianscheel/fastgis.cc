@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { InitConfig, MarkerHover, WorkerInMessage, WorkerOutMessage } from "@/lib/map-protocol";
+import type {
+  InitConfig,
+  MarkerHover,
+  PlacedMarker,
+  ProjectedPoint,
+  WorkerInMessage,
+  WorkerOutMessage
+} from "@/lib/map-protocol";
 
 type MainThreadEngine = {
   resize(width: number, height: number, dpr: number): void;
@@ -13,7 +20,10 @@ type MainThreadEngine = {
   set_view(lon: number, lat: number, zoom: number): void;
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   place_marker(x: number, y: number): void;
+  place_marker_with_info(x: number, y: number): PlacedMarker | null;
   hit_test_marker(x: number, y: number): MarkerHover | null;
+  project_lon_lat(lon: number, lat: number): ProjectedPoint | null;
+  remove_recent_markers(count: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): unknown;
   clear_trajectory(): void;
@@ -45,6 +55,14 @@ export function useMapEngineRuntime({
   const tileUrlTemplateRef = useRef(initialTileUrlTemplate);
   const activeTileTemplateRef = useRef(initialTileUrlTemplate);
   const markerHoverRequestIdRef = useRef(0);
+  const markerPlacementRequestIdRef = useRef(0);
+  const pendingMarkerPlacementsRef = useRef<Map<number, (marker: PlacedMarker | null) => void>>(
+    new Map()
+  );
+  const projectionRequestIdRef = useRef(0);
+  const pendingProjectionRequestsRef = useRef<Map<number, (point: ProjectedPoint | null) => void>>(
+    new Map()
+  );
 
   const [status, setStatus] = useState<RuntimeStatus>("loading");
   const [canvasInstance, setCanvasInstance] = useState(0);
@@ -141,6 +159,100 @@ export function useMapEngineRuntime({
     [canInteract, sendToWorker]
   );
 
+  const placeMarkerWithInfo = useCallback(
+    (x: number, y: number): Promise<PlacedMarker | null> => {
+      if (!canInteract) {
+        return Promise.resolve(null);
+      }
+
+      if (runtimeModeRef.current === "worker") {
+        const requestId = markerPlacementRequestIdRef.current + 1;
+        markerPlacementRequestIdRef.current = requestId;
+
+        return new Promise<PlacedMarker | null>((resolve) => {
+          pendingMarkerPlacementsRef.current.set(requestId, resolve);
+          sendToWorker({
+            type: "PLACE_MARKER_WITH_INFO",
+            payload: {
+              x,
+              y,
+              requestId
+            }
+          });
+        });
+      }
+
+      try {
+        const marker = mainEngineRef.current?.place_marker_with_info(x, y) ?? null;
+        return Promise.resolve(marker);
+      } catch (error) {
+        console.error(error);
+        return Promise.resolve(null);
+      }
+    },
+    [canInteract, sendToWorker]
+  );
+
+  const projectLonLat = useCallback(
+    (lon: number, lat: number): Promise<ProjectedPoint | null> => {
+      if (!canInteract) {
+        return Promise.resolve(null);
+      }
+
+      if (runtimeModeRef.current === "worker") {
+        const requestId = projectionRequestIdRef.current + 1;
+        projectionRequestIdRef.current = requestId;
+
+        return new Promise<ProjectedPoint | null>((resolve) => {
+          pendingProjectionRequestsRef.current.set(requestId, resolve);
+          sendToWorker({
+            type: "PROJECT_LON_LAT",
+            payload: {
+              lon,
+              lat,
+              requestId
+            }
+          });
+        });
+      }
+
+      try {
+        const point = mainEngineRef.current?.project_lon_lat(lon, lat) ?? null;
+        return Promise.resolve(point);
+      } catch (error) {
+        console.error(error);
+        return Promise.resolve(null);
+      }
+    },
+    [canInteract, sendToWorker]
+  );
+
+  const removeRecentMarkers = useCallback(
+    (count: number) => {
+      if (!canInteract) {
+        return;
+      }
+
+      const safeCount = Math.max(0, Math.floor(count));
+      if (safeCount === 0) {
+        return;
+      }
+
+      if (runtimeModeRef.current === "worker") {
+        sendToWorker({
+          type: "REMOVE_RECENT_MARKERS",
+          payload: {
+            count: safeCount
+          }
+        });
+        return;
+      }
+
+      mainEngineRef.current?.remove_recent_markers(safeCount);
+    },
+    [canInteract, sendToWorker]
+  );
+
   const hoverMarkerAtPoint = useCallback(
     (x: number, y: number) => {
       if (!canInteract) {
@@ -227,6 +339,14 @@ export function useMapEngineRuntime({
     workerReadyRef.current = false;
     workerRef.current?.terminate();
     workerRef.current = null;
+    for (const resolve of pendingMarkerPlacementsRef.current.values()) {
+      resolve(null);
+    }
+    pendingMarkerPlacementsRef.current.clear();
+    for (const resolve of pendingProjectionRequestsRef.current.values()) {
+      resolve(null);
+    }
+    pendingProjectionRequestsRef.current.clear();
   }, []);
 
   const resetCanvasElement = useCallback(async () => {
@@ -325,6 +445,28 @@ export function useMapEngineRuntime({
         }
 
         setMarkerHover(message.payload.marker);
+        return;
+      }
+
+      if (message.type === "MARKER_PLACED") {
+        const resolve = pendingMarkerPlacementsRef.current.get(message.payload.requestId);
+        if (!resolve) {
+          return;
+        }
+
+        pendingMarkerPlacementsRef.current.delete(message.payload.requestId);
+        resolve(message.payload.marker);
+        return;
+      }
+
+      if (message.type === "LON_LAT_PROJECTED") {
+        const resolve = pendingProjectionRequestsRef.current.get(message.payload.requestId);
+        if (!resolve) {
+          return;
+        }
+
+        pendingProjectionRequestsRef.current.delete(message.payload.requestId);
+        resolve(message.payload.point);
       }
     },
     [fallbackToMainThread]
@@ -416,6 +558,14 @@ export function useMapEngineRuntime({
       mainEngineRef.current = null;
       runtimeModeRef.current = "none";
       setMarkerHover(null);
+      for (const resolve of pendingMarkerPlacementsRef.current.values()) {
+        resolve(null);
+      }
+      pendingMarkerPlacementsRef.current.clear();
+      for (const resolve of pendingProjectionRequestsRef.current.values()) {
+        resolve(null);
+      }
+      pendingProjectionRequestsRef.current.clear();
     };
   }, [
     baseMapConfig,
@@ -510,6 +660,9 @@ export function useMapEngineRuntime({
     applyWheel,
     zoomToBox,
     placeMarker,
+    placeMarkerWithInfo,
+    projectLonLat,
+    removeRecentMarkers,
     hoverMarkerAtPoint,
     clearMarkerHover,
     loadTrajectoryCsv,

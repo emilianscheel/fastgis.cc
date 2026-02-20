@@ -26,6 +26,18 @@ export type MarkerHover = {
   screenY: number;
 };
 
+export type PlacedMarker = {
+  lon: number;
+  lat: number;
+  tipScreenX: number;
+  tipScreenY: number;
+};
+
+export type ProjectedPoint = {
+  screenX: number;
+  screenY: number;
+};
+
 export type WorkerInMessage =
   | {
       type: "INIT";
@@ -88,11 +100,33 @@ export type WorkerInMessage =
       };
     }
   | {
+      type: "PLACE_MARKER_WITH_INFO";
+      payload: {
+        x: number;
+        y: number;
+        requestId: number;
+      };
+    }
+  | {
       type: "HOVER_MARKER";
       payload: {
         x: number;
         y: number;
         requestId: number;
+      };
+    }
+  | {
+      type: "PROJECT_LON_LAT";
+      payload: {
+        lon: number;
+        lat: number;
+        requestId: number;
+      };
+    }
+  | {
+      type: "REMOVE_RECENT_MARKERS";
+      payload: {
+        count: number;
       };
     }
   | {
@@ -134,6 +168,20 @@ export type WorkerOutMessage =
       type: "MARKER_HOVER";
       payload: {
         marker: MarkerHover | null;
+        requestId: number;
+      };
+    }
+  | {
+      type: "MARKER_PLACED";
+      payload: {
+        marker: PlacedMarker | null;
+        requestId: number;
+      };
+    }
+  | {
+      type: "LON_LAT_PROJECTED";
+      payload: {
+        point: ProjectedPoint | null;
         requestId: number;
       };
     }

@@ -2,18 +2,27 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "next-themes";
+import { toast } from "sonner";
 
 import { CsvDropOverlay } from "@/components/csv-drop-overlay";
-import { MapCanvasStage } from "@/components/map/map-canvas-stage";
+import { MapCanvasStage, type MeasurementSegmentOverlay } from "@/components/map/map-canvas-stage";
 import { MapToolbar, type MapStyleOption } from "@/components/map/map-toolbar";
+import { Kbd } from "@/components/ui/kbd";
 import { useBoxZoomTool } from "@/hooks/use-box-zoom-tool";
 import { useMapEngineRuntime } from "@/hooks/use-map-engine-runtime";
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
 import { appToast } from "@/lib/app-toast";
-import type { InitConfig } from "@/lib/map-protocol";
+import type { InitConfig, PlacedMarker, ProjectedPoint } from "@/lib/map-protocol";
 
 type MapStyle = MapStyleOption & {
   tileUrlTemplate: string;
+};
+
+type MeasurementRenderPoint = {
+  lon: number;
+  lat: number;
+  screenX: number;
+  screenY: number;
 };
 
 const LIGHT_THEME_MAP_STYLE_ID = "carto-light";
@@ -46,6 +55,54 @@ const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
 
 const ZOOM_STEP_DELTA = 1200;
 const ZOOM_STEP_ANIMATION_MS = 300;
+const EARTH_RADIUS_METERS = 6_371_000;
+const MEASUREMENT_GUIDANCE_TOAST_ID = "measure-distance-guidance";
+const COPIED_DISTANCE_TOAST_ID = "measure-distance-copy";
+
+function degreesToRadians(value: number): number {
+  return (value * Math.PI) / 180;
+}
+
+function haversineDistanceMeters(a: PlacedMarker, b: PlacedMarker): number {
+  const lat1 = degreesToRadians(a.lat);
+  const lat2 = degreesToRadians(b.lat);
+  const dLat = lat2 - lat1;
+  const dLon = degreesToRadians(b.lon - a.lon);
+  const sinHalfLat = Math.sin(dLat / 2);
+  const sinHalfLon = Math.sin(dLon / 2);
+  const h = sinHalfLat * sinHalfLat + Math.cos(lat1) * Math.cos(lat2) * sinHalfLon * sinHalfLon;
+  const arc = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
+  return EARTH_RADIUS_METERS * arc;
+}
+
+function formatDistanceMeters(distanceMeters: number): string {
+  return `${distanceMeters.toFixed(2)} m`;
+}
+
+function ordinalPointLabel(value: number): string {
+  if (value === 2) return "second";
+  if (value === 3) return "third";
+  if (value === 4) return "fourth";
+
+  const mod100 = value % 100;
+  if (mod100 >= 11 && mod100 <= 13) {
+    return `${value}th`;
+  }
+
+  const mod10 = value % 10;
+  if (mod10 === 1) return `${value}st`;
+  if (mod10 === 2) return `${value}nd`;
+  if (mod10 === 3) return `${value}rd`;
+  return `${value}th`;
+}
+
+function measurementPromptText(pointCount: number): string {
+  if (pointCount <= 0) {
+    return "please click on the map to start measuring";
+  }
+
+  return `please select the ${ordinalPointLabel(pointCount + 1)} point`;
+}
 
 function mapStyleForTheme(theme?: string): MapStyle["id"] {
   return theme === "dark" ? DARK_THEME_MAP_STYLE_ID : LIGHT_THEME_MAP_STYLE_ID;
@@ -93,6 +150,9 @@ export function MapShell() {
     applyWheel,
     zoomToBox,
     placeMarker,
+    placeMarkerWithInfo,
+    projectLonLat,
+    removeRecentMarkers,
     hoverMarkerAtPoint,
     clearMarkerHover,
     loadTrajectoryCsv,
@@ -125,13 +185,54 @@ export function MapShell() {
     [stopZoomAnimation, zoomToBox]
   );
 
+  const [measurementPoints, setMeasurementPoints] = useState<PlacedMarker[]>([]);
+  const [measurementRenderPoints, setMeasurementRenderPoints] = useState<MeasurementRenderPoint[]>([]);
+  const measurementSessionIdRef = useRef(0);
+  const isMeasurementActiveRef = useRef(false);
+  const wasMeasurementActiveRef = useRef(false);
+
+  const handlePlaceMeasurement = useCallback(
+    (x: number, y: number) => {
+      const requestSessionId = measurementSessionIdRef.current;
+      void (async () => {
+        const marker = await placeMarkerWithInfo(x, y);
+        if (!marker) {
+          return;
+        }
+
+        if (
+          !isMeasurementActiveRef.current ||
+          requestSessionId !== measurementSessionIdRef.current
+        ) {
+          return;
+        }
+
+        setMeasurementPoints((current) => [...current, marker]);
+      })();
+    },
+    [placeMarkerWithInfo]
+  );
+
+  const finishMeasurement = useCallback(() => {
+    measurementSessionIdRef.current += 1;
+
+    if (measurementPoints.length > 0) {
+      removeRecentMarkers(measurementPoints.length);
+    }
+
+    setMeasurementPoints([]);
+    setMeasurementRenderPoints([]);
+  }, [measurementPoints.length, removeRecentMarkers]);
+
   const {
     isBoxZoomActive,
     isMarkerActive,
+    isMeasurementActive,
     boxZoomRect,
     canvasCursorClassName,
     toggleBoxZoomTool,
     toggleMarkerTool,
+    toggleMeasurementTool,
     handleCanvasPointerDown,
     handleCanvasPointerMove,
     handleCanvasPointerUp,
@@ -144,8 +245,49 @@ export function MapShell() {
     onHoverClear: clearMarkerHover,
     onPanPointerEvent: sendPointerEvent,
     onZoomToBox: handleZoomToBox,
-    onPlaceMarker: placeMarker
+    onPlaceMarker: placeMarker,
+    onPlaceMeasurement: handlePlaceMeasurement
   });
+
+  useEffect(() => {
+    const wasMeasurementActive = wasMeasurementActiveRef.current;
+    isMeasurementActiveRef.current = isMeasurementActive;
+
+    if (!isMeasurementActive) {
+      if (wasMeasurementActive) {
+        finishMeasurement();
+      }
+      toast.dismiss(MEASUREMENT_GUIDANCE_TOAST_ID);
+    }
+
+    wasMeasurementActiveRef.current = isMeasurementActive;
+  }, [finishMeasurement, isMeasurementActive]);
+
+  useEffect(() => {
+    return () => {
+      toast.dismiss(MEASUREMENT_GUIDANCE_TOAST_ID);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMeasurementActive) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      finishMeasurement();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [finishMeasurement, isMeasurementActive]);
 
   const handleMarkerHoverCopy = useCallback(async (marker: { lat: number; lon: number }) => {
     const coordinates = `${marker.lat}, ${marker.lon}`;
@@ -155,6 +297,130 @@ export function MapShell() {
     } catch (error) {
       appToast.error("Failed to copy coordinates to clipboard.");
       console.error("Failed to copy marker coordinates.", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (measurementPoints.length === 0) {
+      setMeasurementRenderPoints([]);
+      return;
+    }
+
+    let cancelled = false;
+    let rafId: number | null = null;
+
+    const toRenderPoint = (
+      marker: PlacedMarker,
+      projected: ProjectedPoint | null
+    ): MeasurementRenderPoint => ({
+      lon: marker.lon,
+      lat: marker.lat,
+      screenX: projected?.screenX ?? marker.tipScreenX,
+      screenY: projected?.screenY ?? marker.tipScreenY
+    });
+
+    const tick = async () => {
+      const projectedPoints = await Promise.all(
+        measurementPoints.map((marker) => projectLonLat(marker.lon, marker.lat))
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      setMeasurementRenderPoints(
+        measurementPoints.map((marker, index) => toRenderPoint(marker, projectedPoints[index] ?? null))
+      );
+
+      rafId = window.requestAnimationFrame(() => {
+        void tick();
+      });
+    };
+
+    void tick();
+
+    return () => {
+      cancelled = true;
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [measurementPoints, projectLonLat]);
+
+  const { segments: measurementSegments, totalDistanceMeters } = useMemo(() => {
+    const segments: MeasurementSegmentOverlay[] = [];
+    let totalDistanceMeters = 0;
+
+    for (let index = 1; index < measurementPoints.length; index += 1) {
+      const startMarker = measurementPoints[index - 1];
+      const endMarker = measurementPoints[index];
+      const startRenderPoint = measurementRenderPoints[index - 1] ?? {
+        screenX: startMarker.tipScreenX,
+        screenY: startMarker.tipScreenY
+      };
+      const endRenderPoint = measurementRenderPoints[index] ?? {
+        screenX: endMarker.tipScreenX,
+        screenY: endMarker.tipScreenY
+      };
+      const distanceMeters = haversineDistanceMeters(startMarker, endMarker);
+      totalDistanceMeters += distanceMeters;
+
+      segments.push({
+        startX: startRenderPoint.screenX,
+        startY: startRenderPoint.screenY,
+        endX: endRenderPoint.screenX,
+        endY: endRenderPoint.screenY,
+        centerX: (startRenderPoint.screenX + endRenderPoint.screenX) * 0.5,
+        centerY: (startRenderPoint.screenY + endRenderPoint.screenY) * 0.5,
+        distanceMeters,
+        label: formatDistanceMeters(distanceMeters)
+      });
+    }
+
+    return { segments, totalDistanceMeters };
+  }, [measurementPoints, measurementRenderPoints]);
+
+  useEffect(() => {
+    if (!isMeasurementActive) {
+      return;
+    }
+
+    const prompt = measurementPromptText(measurementPoints.length);
+    appToast.show(
+      <span className="inline-flex items-baseline gap-1">
+        <span>{prompt}</span>
+        <span className="font-mono tabular-nums">{formatDistanceMeters(totalDistanceMeters)}</span>
+        <span className="inline-flex items-center gap-1">
+          <Kbd className="h-4 px-1 text-[10px]">Enter</Kbd>
+          <span>finishes measurement</span>
+        </span>
+      </span>,
+      {
+        id: MEASUREMENT_GUIDANCE_TOAST_ID,
+        duration: Number.POSITIVE_INFINITY,
+        closeButton: false
+      }
+    );
+  }, [isMeasurementActive, measurementPoints.length, totalDistanceMeters]);
+
+  const handleMeasurementDistanceCopy = useCallback(async (distanceMeters: number) => {
+    const formattedDistance = formatDistanceMeters(distanceMeters);
+
+    try {
+      await navigator.clipboard.writeText(formattedDistance);
+      appToast.show(
+        <span className="inline-flex items-baseline gap-1">
+          <span>Copied</span>
+          <span className="font-mono tabular-nums">{formattedDistance}</span>
+          <span>to clipboard</span>
+        </span>,
+        {
+          id: COPIED_DISTANCE_TOAST_ID
+        }
+      );
+    } catch (error) {
+      appToast.error("Failed to copy distance to clipboard.");
+      console.error("Failed to copy measured distance.", error);
     }
   }, []);
 
@@ -253,13 +519,16 @@ export function MapShell() {
         canvasKey={canvasInstance}
         cursorClassName={canvasCursorClassName}
         boxZoomRect={boxZoomRect}
-        markerHover={markerHover}
+        markerHover={isMeasurementActive ? null : markerHover}
+        isMeasurementActive={isMeasurementActive}
+        measurementSegments={measurementSegments}
         onPointerDown={handleCanvasPointerDown}
         onPointerMove={handleCanvasPointerMove}
         onPointerUp={handleCanvasPointerUp}
         onPointerCancel={handleCanvasPointerCancel}
         onPointerLeave={handleCanvasPointerLeave}
         onMarkerHoverCopy={handleMarkerHoverCopy}
+        onMeasurementDistanceCopy={handleMeasurementDistanceCopy}
       />
       <CsvDropOverlay enabled={canInteract} onDropFiles={handleDroppedFiles} />
       <MapToolbar
@@ -269,9 +538,11 @@ export function MapShell() {
         mapStyles={MAP_STYLES}
         isBoxZoomActive={isBoxZoomActive}
         isMarkerActive={isMarkerActive}
+        isMeasurementActive={isMeasurementActive}
         onMapStyleChange={handleMapStyleChange}
         onToggleBoxZoom={toggleBoxZoomTool}
         onToggleMarker={toggleMarkerTool}
+        onToggleMeasurement={toggleMeasurementTool}
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
       />

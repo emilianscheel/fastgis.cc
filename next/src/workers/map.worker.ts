@@ -1,6 +1,13 @@
 /// <reference lib="webworker" />
 
-import type { CsvLoadResult, MarkerHover, WorkerInMessage, WorkerOutMessage } from "../lib/map-protocol";
+import type {
+  CsvLoadResult,
+  MarkerHover,
+  PlacedMarker,
+  ProjectedPoint,
+  WorkerInMessage,
+  WorkerOutMessage
+} from "../lib/map-protocol";
 
 type WasmMapEngine = {
   resize(width: number, height: number, dpr: number): void;
@@ -11,7 +18,10 @@ type WasmMapEngine = {
   set_view(lon: number, lat: number, zoom: number): void;
   zoom_to_box(startX: number, startY: number, endX: number, endY: number): void;
   place_marker(x: number, y: number): void;
+  place_marker_with_info(x: number, y: number): PlacedMarker | null;
   hit_test_marker(x: number, y: number): MarkerHover | null;
+  project_lon_lat(lon: number, lat: number): ProjectedPoint | null;
+  remove_recent_markers(count: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
   clear_trajectory(): void;
@@ -94,12 +104,33 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
   }
 
   if (!engine) {
+    if (message.type === "PLACE_MARKER_WITH_INFO") {
+      postMessageToMain({
+        type: "MARKER_PLACED",
+        payload: {
+          marker: null,
+          requestId: message.payload.requestId
+        }
+      });
+      return;
+    }
+
     if (message.type === "LOAD_TRAJECTORY_CSV") {
       postMessageToMain({
         type: "ERROR",
         payload: {
           code: "ENGINE_NOT_READY",
           message: "Renderer engine is not initialized yet."
+        }
+      });
+    }
+
+    if (message.type === "PROJECT_LON_LAT") {
+      postMessageToMain({
+        type: "LON_LAT_PROJECTED",
+        payload: {
+          point: null,
+          requestId: message.payload.requestId
         }
       });
     }
@@ -151,6 +182,18 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
     return;
   }
 
+  if (message.type === "PLACE_MARKER_WITH_INFO") {
+    const marker = engine.place_marker_with_info(message.payload.x, message.payload.y) ?? null;
+    postMessageToMain({
+      type: "MARKER_PLACED",
+      payload: {
+        marker,
+        requestId: message.payload.requestId
+      }
+    });
+    return;
+  }
+
   if (message.type === "HOVER_MARKER") {
     const marker = engine.hit_test_marker(message.payload.x, message.payload.y) ?? null;
     postMessageToMain({
@@ -160,6 +203,23 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
         requestId: message.payload.requestId
       }
     });
+    return;
+  }
+
+  if (message.type === "PROJECT_LON_LAT") {
+    const point = engine.project_lon_lat(message.payload.lon, message.payload.lat) ?? null;
+    postMessageToMain({
+      type: "LON_LAT_PROJECTED",
+      payload: {
+        point,
+        requestId: message.payload.requestId
+      }
+    });
+    return;
+  }
+
+  if (message.type === "REMOVE_RECENT_MARKERS") {
+    engine.remove_recent_markers(message.payload.count);
     return;
   }
 

@@ -183,6 +183,22 @@ struct MarkerHover {
     screen_y: f64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlacedMarker {
+    lon: f64,
+    lat: f64,
+    tip_screen_x: f64,
+    tip_screen_y: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedPoint {
+    screen_x: f64,
+    screen_y: f64,
+}
+
 enum CanvasSurface {
     Html(HtmlCanvasElement),
     Offscreen(OffscreenCanvas),
@@ -857,9 +873,9 @@ impl EngineState {
         );
     }
 
-    fn place_marker_at_screen(&mut self, x: f64, y: f64) {
+    fn place_marker_at_screen(&mut self, x: f64, y: f64) -> Option<PlacedMarker> {
         if self.width <= 0.0 || self.height <= 0.0 {
-            return;
+            return None;
         }
 
         let clamped_x = x.clamp(0.0, self.width);
@@ -872,10 +888,27 @@ impl EngineState {
         let (marker_lon, marker_lat) =
             world_to_lon_lat(marker_world0_x, marker_world0_y, 0, self.tile_size);
 
-        self.location_markers.push(LocationMarker {
+        let placed_marker = LocationMarker {
             lon: normalize_lon(marker_lon),
             lat: clamp_lat(marker_lat),
-        });
+        };
+        self.location_markers.push(placed_marker);
+
+        Some(PlacedMarker {
+            lon: placed_marker.lon,
+            lat: placed_marker.lat,
+            tip_screen_x: clamped_x,
+            tip_screen_y: clamped_y,
+        })
+    }
+
+    fn remove_recent_markers(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+
+        let keep_len = self.location_markers.len().saturating_sub(count);
+        self.location_markers.truncate(keep_len);
     }
 
     fn draw(&mut self, now_ms: f64) {
@@ -990,6 +1023,22 @@ impl EngineState {
         let tip_x = (marker_world0_x - center_world0_x) * display_scale + self.width / 2.0;
         let tip_y = (marker_world0_y - center_world0_y) * display_scale + self.height / 2.0;
         (tip_x, tip_y)
+    }
+
+    fn project_lon_lat_to_screen(&self, lon: f64, lat: f64) -> Option<ProjectedPoint> {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return None;
+        }
+
+        let normalized_lon = normalize_lon(lon);
+        let clamped_lat = clamp_lat(lat);
+        let display_scale = Self::zoom_scale(self.zoom);
+        let (center_world0_x, center_world0_y) = self.center_world0();
+        let (world0_x, world0_y) = lon_lat_to_world(normalized_lon, clamped_lat, 0, self.tile_size);
+        let screen_x = (world0_x - center_world0_x) * display_scale + self.width / 2.0;
+        let screen_y = (world0_y - center_world0_y) * display_scale + self.height / 2.0;
+
+        Some(ProjectedPoint { screen_x, screen_y })
     }
 
     fn marker_head_center_from_tip(tip_x: f64, tip_y: f64) -> (f64, f64) {
@@ -1469,15 +1518,36 @@ impl MapEngine {
     }
 
     pub fn place_marker(&mut self, x: f32, y: f32) {
-        self.state
+        let _ = self
+            .state
             .borrow_mut()
             .place_marker_at_screen(f64::from(x), f64::from(y));
+    }
+
+    pub fn place_marker_with_info(&mut self, x: f32, y: f32) -> Result<JsValue, JsValue> {
+        let placed_marker = self
+            .state
+            .borrow_mut()
+            .place_marker_at_screen(f64::from(x), f64::from(y));
+        serde_wasm_bindgen::to_value(&placed_marker).map_err(Into::into)
     }
 
     pub fn hit_test_marker(&self, x: f32, y: f32) -> Result<JsValue, JsValue> {
         let state = self.state.borrow();
         let hover = state.hit_test_marker_at_screen(f64::from(x), f64::from(y));
         serde_wasm_bindgen::to_value(&hover).map_err(Into::into)
+    }
+
+    pub fn project_lon_lat(&self, lon: f64, lat: f64) -> Result<JsValue, JsValue> {
+        let state = self.state.borrow();
+        let projected = state.project_lon_lat_to_screen(lon, lat);
+        serde_wasm_bindgen::to_value(&projected).map_err(Into::into)
+    }
+
+    pub fn remove_recent_markers(&mut self, count: u32) {
+        self.state
+            .borrow_mut()
+            .remove_recent_markers(count as usize);
     }
 
     pub fn frame(&mut self, now_ms: f64) {

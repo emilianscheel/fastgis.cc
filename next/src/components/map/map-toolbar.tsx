@@ -1,6 +1,6 @@
 "use client";
 
-import { Crop, MapPin, Minus, Plus } from "lucide-react";
+import { Crop, MapPin, Minus, Plus, Ruler } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,9 +24,11 @@ type MapToolbarProps = {
   mapStyles: MapStyleOption[];
   isBoxZoomActive: boolean;
   isMarkerActive: boolean;
+  isMeasurementActive: boolean;
   onMapStyleChange: (value: string) => void;
   onToggleBoxZoom: () => void;
   onToggleMarker: () => void;
+  onToggleMeasurement: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
 };
@@ -38,9 +40,11 @@ export function MapToolbar({
   mapStyles,
   isBoxZoomActive,
   isMarkerActive,
+  isMeasurementActive,
   onMapStyleChange,
   onToggleBoxZoom,
   onToggleMarker,
+  onToggleMeasurement,
   onZoomIn,
   onZoomOut
 }: MapToolbarProps) {
@@ -83,6 +87,21 @@ export function MapToolbar({
             title="Place marker tool"
           >
             <MapPin className="h-4 w-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={`h-9 w-9 rounded-none border-border/80 p-0 text-foreground hover:bg-muted/60 ${
+              isMeasurementActive ? "bg-muted" : "bg-background"
+            }`}
+            onClick={onToggleMeasurement}
+            disabled={!canInteract}
+            aria-label="Measure distance tool"
+            aria-pressed={isMeasurementActive}
+            title="Measure distance tool"
+          >
+            <Ruler className="h-4 w-4" aria-hidden="true" />
           </Button>
           <Button
             type="button"

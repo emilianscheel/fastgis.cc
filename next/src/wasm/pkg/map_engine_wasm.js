@@ -66,6 +66,18 @@ export class MapEngine {
     /**
      * @param {number} x
      * @param {number} y
+     * @returns {any}
+     */
+    place_marker_with_info(x, y) {
+        const ret = wasm.mapengine_place_marker_with_info(this.__wbg_ptr, x, y);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} x
+     * @param {number} y
      * @param {number} button
      */
     pointer_down(x, y, button) {
@@ -84,6 +96,24 @@ export class MapEngine {
      */
     pointer_up(_x, _y) {
         wasm.mapengine_pointer_up(this.__wbg_ptr, _x, _y);
+    }
+    /**
+     * @param {number} lon
+     * @param {number} lat
+     * @returns {any}
+     */
+    project_lon_lat(lon, lat) {
+        const ret = wasm.mapengine_project_lon_lat(this.__wbg_ptr, lon, lat);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} count
+     */
+    remove_recent_markers(count) {
+        wasm.mapengine_remove_recent_markers(this.__wbg_ptr, count);
     }
     /**
      * @param {number} width
