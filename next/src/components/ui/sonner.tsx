@@ -10,9 +10,10 @@ type ToasterProps = React.ComponentProps<typeof Sonner>;
 
 const DEFAULT_TOAST_CLASSNAMES = {
   toast:
-    "group toast !mx-auto !h-auto !min-h-0 !w-fit !max-w-[calc(100vw-2rem)] !whitespace-nowrap !rounded-full border border-border/80 bg-background/95 px-4 py-2 text-center text-xs font-medium text-foreground shadow-md backdrop-blur-sm",
+    "group toast !mx-auto !h-auto !min-h-0 !w-max !max-w-none !whitespace-nowrap !rounded-full border border-border/80 bg-background/95 px-4 py-2 text-center text-xs font-medium text-foreground shadow-md backdrop-blur-sm !justify-center",
   title: "leading-none",
   description: "text-xs leading-tight text-muted-foreground",
+  content: "w-full items-center text-center",
   actionButton: "rounded-full bg-primary px-3 text-primary-foreground",
   cancelButton: "rounded-full bg-muted px-3 text-muted-foreground"
 };

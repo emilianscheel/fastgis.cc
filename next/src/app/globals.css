@@ -59,14 +59,10 @@ body {
     linear-gradient(160deg, rgba(6, 11, 20, 0.94), rgba(10, 18, 30, 0.94));
 }
 
-[data-sonner-toaster][data-x-position="center"] {
-  left: 0 !important;
-  right: 0 !important;
-  transform: none !important;
-  align-items: center !important;
-}
-
-[data-sonner-toaster][data-x-position="center"] [data-sonner-toast] {
-  margin-left: auto !important;
-  margin-right: auto !important;
+[data-sonner-toast][data-x-position="center"] {
+  left: 50% !important;
+  right: auto !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  translate: -50% 0;
 }
