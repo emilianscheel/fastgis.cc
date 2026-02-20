@@ -54,6 +54,19 @@ export class MapEngine {
      * @param {Uint8Array} bytes
      * @returns {any}
      */
+    load_marker_csv(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.mapengine_load_marker_csv(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {any}
+     */
     load_trajectory_csv(bytes) {
         const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;

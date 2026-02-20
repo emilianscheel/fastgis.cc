@@ -17,6 +17,7 @@ import { useBoxZoomTool } from "@/hooks/use-box-zoom-tool";
 import { useMapEngineRuntime } from "@/hooks/use-map-engine-runtime";
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
 import { appToast } from "@/lib/app-toast";
+import { dispatchScannedImport, scanImportFile } from "@/lib/import";
 import type { InitConfig, PlacedMarker, ProjectedPoint } from "@/lib/map-protocol";
 
 type MapStyle = MapStyleOption & {
@@ -28,6 +29,15 @@ type MeasurementRenderPoint = {
   lat: number;
   screenX: number;
   screenY: number;
+};
+
+type ActiveMeasurementDrag = {
+  markerIndex: number;
+  marker: PlacedMarker;
+  sessionId: number;
+  inFlight: boolean;
+  queuedTarget: { x: number; y: number } | null;
+  dropRequested: boolean;
 };
 
 const LIGHT_THEME_MAP_STYLE_ID = "carto-light";
@@ -62,6 +72,9 @@ const ZOOM_STEP_DELTA = 1200;
 const ZOOM_STEP_ANIMATION_MS = 300;
 const EARTH_RADIUS_METERS = 6_371_000;
 const MARKER_COORDINATE_MATCH_EPSILON = 1e-6;
+const LOCATION_MARKER_HEAD_RADIUS_PX = 8;
+const LOCATION_MARKER_HEAD_CENTER_OFFSET_Y_PX = 12;
+const LOCATION_MARKER_TAIL_HALF_WIDTH_PX = 5;
 const MEASUREMENT_GUIDANCE_TOAST_ID = "measure-distance-guidance";
 const COPIED_DISTANCE_TOAST_ID = "measure-distance-copy";
 
@@ -108,6 +121,73 @@ function measurementPromptText(pointCount: number): string {
   }
 
   return `please select the ${ordinalPointLabel(pointCount + 1)} point`;
+}
+
+function markerHeadCenterFromTip(tipX: number, tipY: number): { x: number; y: number } {
+  return {
+    x: tipX,
+    y: tipY - LOCATION_MARKER_HEAD_CENTER_OFFSET_Y_PX
+  };
+}
+
+function markerTailTopY(headCenterY: number): number {
+  return headCenterY + LOCATION_MARKER_HEAD_RADIUS_PX - 1;
+}
+
+function triangleSign(
+  pointX: number,
+  pointY: number,
+  aX: number,
+  aY: number,
+  bX: number,
+  bY: number
+): number {
+  return (pointX - bX) * (aY - bY) - (aX - bX) * (pointY - bY);
+}
+
+function pointInTriangle(
+  pointX: number,
+  pointY: number,
+  aX: number,
+  aY: number,
+  bX: number,
+  bY: number,
+  cX: number,
+  cY: number
+): boolean {
+  const d1 = triangleSign(pointX, pointY, aX, aY, bX, bY);
+  const d2 = triangleSign(pointX, pointY, bX, bY, cX, cY);
+  const d3 = triangleSign(pointX, pointY, cX, cY, aX, aY);
+  const hasNegative = d1 < 0 || d2 < 0 || d3 < 0;
+  const hasPositive = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(hasNegative && hasPositive);
+}
+
+function markerContainsPointer(
+  tipX: number,
+  tipY: number,
+  pointerX: number,
+  pointerY: number
+): boolean {
+  const headCenter = markerHeadCenterFromTip(tipX, tipY);
+  const dx = pointerX - headCenter.x;
+  const dy = pointerY - headCenter.y;
+  const inHead = dx * dx + dy * dy <= LOCATION_MARKER_HEAD_RADIUS_PX * LOCATION_MARKER_HEAD_RADIUS_PX;
+  if (inHead) {
+    return true;
+  }
+
+  const tailTopY = markerTailTopY(headCenter.y);
+  return pointInTriangle(
+    pointerX,
+    pointerY,
+    tipX,
+    tipY,
+    tipX - LOCATION_MARKER_TAIL_HALF_WIDTH_PX,
+    tailTopY,
+    tipX + LOCATION_MARKER_TAIL_HALF_WIDTH_PX,
+    tailTopY
+  );
 }
 
 function mapStyleForTheme(theme?: string): MapStyle["id"] {
@@ -164,6 +244,7 @@ export function MapShell() {
     hoverMarkerAtPoint,
     clearMarkerHover,
     loadTrajectoryCsv,
+    loadMarkerCsv,
     setTileUrlTemplate
   } = useMapEngineRuntime({
     initialTileUrlTemplate: selectedMapStyle.tileUrlTemplate,
@@ -234,6 +315,8 @@ export function MapShell() {
   const isMeasurementActiveRef = useRef(false);
   const wasMeasurementActiveRef = useRef(false);
   const measurementPointsRef = useRef<PlacedMarker[]>([]);
+  const measurementRenderPointsRef = useRef<MeasurementRenderPoint[]>([]);
+  const activeMeasurementDragRef = useRef<ActiveMeasurementDrag | null>(null);
 
   const handlePlaceMeasurement = useCallback(
     (x: number, y: number) => {
@@ -248,6 +331,7 @@ export function MapShell() {
           !isMeasurementActiveRef.current ||
           requestSessionId !== measurementSessionIdRef.current
         ) {
+          removeRecentMarkers(1);
           return;
         }
 
@@ -258,12 +342,13 @@ export function MapShell() {
         });
       })();
     },
-    [placeMarkerWithInfo]
+    [placeMarkerWithInfo, removeRecentMarkers]
   );
 
   const finishMeasurement = useCallback(() => {
     const currentPoints = measurementPointsRef.current;
     measurementSessionIdRef.current += 1;
+    activeMeasurementDragRef.current = null;
 
     if (currentPoints.length > 0) {
       removeRecentMarkers(currentPoints.length);
@@ -273,6 +358,153 @@ export function MapShell() {
     setMeasurementPoints([]);
     setMeasurementRenderPoints([]);
   }, [removeRecentMarkers]);
+
+  const findMeasurementMarkerIndexAtPoint = useCallback((x: number, y: number): number | null => {
+    const points = measurementPointsRef.current;
+    const renderPoints = measurementRenderPointsRef.current;
+
+    for (let index = points.length - 1; index >= 0; index -= 1) {
+      const marker = points[index];
+      const renderPoint = renderPoints[index];
+      const tipX = renderPoint?.screenX ?? marker.tipScreenX;
+      const tipY = renderPoint?.screenY ?? marker.tipScreenY;
+      if (markerContainsPointer(tipX, tipY, x, y)) {
+        return index;
+      }
+    }
+
+    return null;
+  }, []);
+
+  const handleStartMeasurementMarkerDrag = useCallback(
+    (x: number, y: number): boolean => {
+      const markerIndex = findMeasurementMarkerIndexAtPoint(x, y);
+      if (markerIndex === null) {
+        return false;
+      }
+
+      const marker = measurementPointsRef.current[markerIndex];
+      if (!marker) {
+        return false;
+      }
+
+      activeMeasurementDragRef.current = {
+        markerIndex,
+        marker,
+        sessionId: measurementSessionIdRef.current,
+        inFlight: false,
+        queuedTarget: null,
+        dropRequested: false
+      };
+      return true;
+    },
+    [findMeasurementMarkerIndexAtPoint]
+  );
+
+  const commitMeasurementDragTarget = useCallback(
+    (activeDrag: ActiveMeasurementDrag, x: number, y: number) => {
+      const run = (targetX: number, targetY: number) => {
+        if (activeDrag.inFlight) {
+          activeDrag.queuedTarget = { x: targetX, y: targetY };
+          return;
+        }
+
+        activeDrag.inFlight = true;
+        const previousMarker = activeDrag.marker;
+
+        void (async () => {
+          const marker = await placeMarkerWithInfo(targetX, targetY);
+
+          if (!marker) {
+            activeDrag.inFlight = false;
+          } else if (
+            !isMeasurementActiveRef.current ||
+            activeDrag.sessionId !== measurementSessionIdRef.current
+          ) {
+            removeRecentMarkers(1);
+            activeDrag.inFlight = false;
+            activeDrag.queuedTarget = null;
+            if (activeMeasurementDragRef.current === activeDrag) {
+              activeMeasurementDragRef.current = null;
+            }
+            return;
+          } else {
+            removeMarkerByLonLat(previousMarker.lon, previousMarker.lat);
+            activeDrag.marker = marker;
+
+            setMeasurementPoints((current) => {
+              if (
+                activeDrag.markerIndex < 0 ||
+                activeDrag.markerIndex >= current.length ||
+                activeDrag.sessionId !== measurementSessionIdRef.current
+              ) {
+                return current;
+              }
+
+              const next = [...current];
+              next[activeDrag.markerIndex] = marker;
+              measurementPointsRef.current = next;
+              return next;
+            });
+
+            activeDrag.inFlight = false;
+          }
+
+          const queuedTarget = activeDrag.queuedTarget;
+          activeDrag.queuedTarget = null;
+          if (queuedTarget) {
+            run(queuedTarget.x, queuedTarget.y);
+            return;
+          }
+
+          if (activeDrag.dropRequested && activeMeasurementDragRef.current === activeDrag) {
+            activeMeasurementDragRef.current = null;
+          }
+        })();
+      };
+
+      run(x, y);
+    },
+    [placeMarkerWithInfo, removeMarkerByLonLat, removeRecentMarkers]
+  );
+
+  const handleDragMeasurementMarker = useCallback(
+    (x: number, y: number) => {
+      const activeDrag = activeMeasurementDragRef.current;
+      if (!activeDrag) {
+        return;
+      }
+
+      commitMeasurementDragTarget(activeDrag, x, y);
+    },
+    [commitMeasurementDragTarget]
+  );
+
+  const handleDropMeasurementMarker = useCallback(
+    (x: number, y: number) => {
+      const activeDrag = activeMeasurementDragRef.current;
+      if (!activeDrag) {
+        return;
+      }
+
+      activeDrag.dropRequested = true;
+      commitMeasurementDragTarget(activeDrag, x, y);
+    },
+    [commitMeasurementDragTarget]
+  );
+
+  const handleCancelMeasurementMarkerDrag = useCallback(() => {
+    const activeDrag = activeMeasurementDragRef.current;
+    if (!activeDrag) {
+      return;
+    }
+
+    activeDrag.dropRequested = true;
+    activeDrag.queuedTarget = null;
+    if (!activeDrag.inFlight) {
+      activeMeasurementDragRef.current = null;
+    }
+  }, []);
 
   const {
     isBoxZoomActive,
@@ -303,7 +535,11 @@ export function MapShell() {
       stepZoom(direction, { x, y });
     },
     onPlaceMarker: placeMarker,
-    onPlaceMeasurement: handlePlaceMeasurement
+    onPlaceMeasurement: handlePlaceMeasurement,
+    onStartMeasurementMarkerDrag: handleStartMeasurementMarkerDrag,
+    onDragMeasurementMarker: handleDragMeasurementMarker,
+    onDropMeasurementMarker: handleDropMeasurementMarker,
+    onCancelMeasurementMarkerDrag: handleCancelMeasurementMarkerDrag
   });
 
   useEffect(() => {
@@ -323,6 +559,10 @@ export function MapShell() {
   useEffect(() => {
     measurementPointsRef.current = measurementPoints;
   }, [measurementPoints]);
+
+  useEffect(() => {
+    measurementRenderPointsRef.current = measurementRenderPoints;
+  }, [measurementRenderPoints]);
 
   useEffect(() => {
     return () => {
@@ -525,6 +765,10 @@ export function MapShell() {
             content: <span className="font-mono tabular-nums">{formatDistanceMeters(totalDistanceMeters)}</span>
           },
           {
+            key: "adjust",
+            content: <span>drag a marker to adjust a point</span>
+          },
+          {
             key: "finish",
             content: (
               <span className="inline-flex items-center gap-1">
@@ -582,22 +826,39 @@ export function MapShell() {
     setTileUrlTemplate(selectedMapStyle.tileUrlTemplate);
   }, [selectedMapStyle, setTileUrlTemplate]);
 
-  const handleCsvBytes = useCallback(
-    (fileName: string, bytes: Uint8Array) => {
-      loadTrajectoryCsv(fileName, bytes);
+  const handleImportBytes = useCallback(
+    (file: File, bytes: Uint8Array) => {
+      const scanResult = scanImportFile({
+        fileName: file.name,
+        mimeType: file.type,
+        bytes
+      });
+
+      if (!scanResult) {
+        appToast.error(`Unsupported import format: ${file.name}`);
+        return;
+      }
+
+      const dispatchResult = dispatchScannedImport(scanResult, file.name, bytes, {
+        loadTrajectoryCsv,
+        loadMarkerCsv
+      });
+
+      if (!dispatchResult.accepted) {
+        appToast.error(`No import handler available for: ${file.name}`);
+      }
     },
-    [loadTrajectoryCsv]
+    [loadMarkerCsv, loadTrajectoryCsv]
   );
 
   const handleFile = useCallback(
     async (file: File) => {
       if (!canInteract) return;
-      if (!file.name.toLowerCase().endsWith(".csv")) return;
 
       const bytes = new Uint8Array(await file.arrayBuffer());
-      handleCsvBytes(file.name, bytes);
+      handleImportBytes(file, bytes);
     },
-    [canInteract, handleCsvBytes]
+    [canInteract, handleImportBytes]
   );
 
   const handleDroppedFiles = useCallback(

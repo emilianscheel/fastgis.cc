@@ -157,6 +157,13 @@ export type WorkerInMessage =
       };
     }
   | {
+      type: "LOAD_MARKER_CSV";
+      payload: {
+        name: string;
+        bytes: Uint8Array;
+      };
+    }
+  | {
       type: "CLEAR_TRAJECTORY";
       payload: Record<string, never>;
     }

@@ -28,6 +28,7 @@ type MainThreadEngine = {
   remove_recent_markers(count: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): unknown;
+  load_marker_csv(bytes: Uint8Array): unknown;
   clear_trajectory(): void;
   set_tile_url_template(template: string): void;
   destroy(): void;
@@ -670,6 +671,33 @@ export function useMapEngineRuntime({
     [canInteract, sendToWorker]
   );
 
+  const loadMarkerCsv = useCallback(
+    (fileName: string, bytes: Uint8Array) => {
+      if (!canInteract) return;
+
+      if (runtimeModeRef.current === "worker") {
+        if (!workerReadyRef.current) return;
+
+        sendToWorker(
+          {
+            type: "LOAD_MARKER_CSV",
+            payload: { name: fileName, bytes }
+          },
+          [bytes.buffer as ArrayBuffer]
+        );
+        return;
+      }
+
+      try {
+        mainEngineRef.current?.load_marker_csv(bytes);
+      } catch (error) {
+        setStatus("error");
+        console.error(error);
+      }
+    },
+    [canInteract, sendToWorker]
+  );
+
   const setTileUrlTemplate = useCallback(
     (tileUrlTemplate: string) => {
       tileUrlTemplateRef.current = tileUrlTemplate;
@@ -714,6 +742,7 @@ export function useMapEngineRuntime({
     hoverMarkerAtPoint,
     clearMarkerHover,
     loadTrajectoryCsv,
+    loadMarkerCsv,
     setTileUrlTemplate
   };
 }

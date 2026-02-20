@@ -1,7 +1,8 @@
 use js_sys::Array;
 use map_core::{
-    clamp_lat, lon_lat_to_world, normalize_lon, parse_trajectory_csv, trajectory_bounds,
-    world_to_lon_lat, Bounds, TrajectoryPoint,
+    clamp_lat, lon_lat_to_world, marker_bounds, normalize_lon, parse_marker_csv,
+    parse_trajectory_csv, trajectory_bounds, world_to_lon_lat, Bounds, MarkerPoint,
+    TrajectoryPoint,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -32,6 +33,9 @@ const LOCATION_MARKER_INNER_DOT_RADIUS_PX: f64 = 3.0;
 const LOCATION_MARKER_TOOLTIP_OFFSET_Y_PX: f64 = 6.0;
 const LOCATION_MARKER_FILL_COLOR: &str = "#f97316";
 const LOCATION_MARKER_INNER_DOT_COLOR: &str = "#fff7ed";
+const MAX_MARKERS_RENDERED_PER_FRAME: usize = 50_000;
+const MAX_MARKERS_HIT_TEST_PER_EVENT: usize = 20_000;
+const MARKER_RENDER_MARGIN_PX: f64 = 32.0;
 
 #[wasm_bindgen(inline_js = r#"
 export async function fetchTileBitmap(url) {
@@ -159,12 +163,6 @@ struct ViewAnimation {
     target_zoom: f64,
     start_ms: f64,
     duration_ms: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct LocationMarker {
-    lon: f64,
-    lat: f64,
 }
 
 #[derive(Serialize)]
@@ -374,7 +372,7 @@ struct EngineState {
     tile_cache: HashMap<TileKey, CachedTile>,
     pending_tiles: HashSet<TileKey>,
     trajectories: Vec<Vec<TrajectoryPoint>>,
-    location_markers: Vec<LocationMarker>,
+    location_markers: Vec<MarkerPoint>,
     high_priority_queue: VecDeque<TileKey>,
     medium_priority_queue: VecDeque<TileKey>,
     low_priority_queue: VecDeque<TileKey>,
@@ -495,12 +493,40 @@ impl EngineState {
     }
 
     fn trajectories_bounds(&self) -> Option<Bounds> {
-        let all_points: Vec<TrajectoryPoint> = self
-            .trajectories
-            .iter()
-            .flat_map(|route| route.iter().cloned())
-            .collect();
-        trajectory_bounds(&all_points)
+        let mut bounds: Option<Bounds> = None;
+
+        for route in &self.trajectories {
+            if let Some(route_bounds) = trajectory_bounds(route) {
+                match &mut bounds {
+                    Some(current) => {
+                        current.min_lat = current.min_lat.min(route_bounds.min_lat);
+                        current.max_lat = current.max_lat.max(route_bounds.max_lat);
+                        current.min_lon = current.min_lon.min(route_bounds.min_lon);
+                        current.max_lon = current.max_lon.max(route_bounds.max_lon);
+                    }
+                    None => bounds = Some(route_bounds),
+                }
+            }
+        }
+
+        bounds
+    }
+
+    fn location_markers_bounds(&self) -> Option<Bounds> {
+        marker_bounds(&self.location_markers)
+    }
+
+    fn sample_step(total: usize, budget: usize) -> usize {
+        if budget == 0 {
+            return 1;
+        }
+        if total <= budget {
+            return 1;
+        }
+        total
+            .saturating_add(budget - 1)
+            .saturating_div(budget)
+            .max(1)
     }
 
     fn color_css(rgb: [f64; 3]) -> String {
@@ -907,13 +933,21 @@ impl EngineState {
         self.location_markers.truncate(keep_len);
     }
 
-    fn push_marker_lon_lat(&mut self, lon: f64, lat: f64) -> LocationMarker {
-        let marker = LocationMarker {
+    fn push_marker_lon_lat(&mut self, lon: f64, lat: f64) -> MarkerPoint {
+        let marker = MarkerPoint {
             lon: normalize_lon(lon),
             lat: clamp_lat(lat),
         };
         self.location_markers.push(marker);
         marker
+    }
+
+    fn append_marker_points(&mut self, mut markers: Vec<MarkerPoint>) {
+        for marker in &mut markers {
+            marker.lon = normalize_lon(marker.lon);
+            marker.lat = clamp_lat(marker.lat);
+        }
+        self.location_markers.extend(markers);
     }
 
     fn remove_marker_lon_lat(&mut self, lon: f64, lat: f64) {
@@ -1033,7 +1067,7 @@ impl EngineState {
         self.ctx.fill();
     }
 
-    fn marker_tip_screen_position(&self, marker: LocationMarker) -> (f64, f64) {
+    fn marker_tip_screen_position(&self, marker: MarkerPoint) -> (f64, f64) {
         let display_scale = Self::zoom_scale(self.zoom);
         let (center_world0_x, center_world0_y) = self.center_world0();
         let (marker_world0_x, marker_world0_y) =
@@ -1093,7 +1127,8 @@ impl EngineState {
         let (head_center_x, head_center_y) = Self::marker_head_center_from_tip(tip_x, tip_y);
         let dx = pointer_x - head_center_x;
         let dy = pointer_y - head_center_y;
-        let in_head = dx * dx + dy * dy <= LOCATION_MARKER_HEAD_RADIUS_PX * LOCATION_MARKER_HEAD_RADIUS_PX;
+        let in_head =
+            dx * dx + dy * dy <= LOCATION_MARKER_HEAD_RADIUS_PX * LOCATION_MARKER_HEAD_RADIUS_PX;
         if in_head {
             return true;
         }
@@ -1116,7 +1151,9 @@ impl EngineState {
             return None;
         }
 
-        for marker in self.location_markers.iter().rev() {
+        let step = Self::sample_step(self.location_markers.len(), MAX_MARKERS_HIT_TEST_PER_EVENT);
+
+        for marker in self.location_markers.iter().rev().step_by(step) {
             let (tip_x, tip_y) = self.marker_tip_screen_position(*marker);
             if !Self::marker_contains_pointer(tip_x, tip_y, x, y) {
                 continue;
@@ -1141,13 +1178,22 @@ impl EngineState {
             return;
         }
 
-        for marker in &self.location_markers {
-            self.draw_location_marker(*marker);
+        let step = Self::sample_step(self.location_markers.len(), MAX_MARKERS_RENDERED_PER_FRAME);
+
+        for marker in self.location_markers.iter().step_by(step) {
+            let (tip_x, tip_y) = self.marker_tip_screen_position(*marker);
+            if tip_x < -MARKER_RENDER_MARGIN_PX
+                || tip_x > self.width + MARKER_RENDER_MARGIN_PX
+                || tip_y < -MARKER_RENDER_MARGIN_PX
+                || tip_y > self.height + MARKER_RENDER_MARGIN_PX
+            {
+                continue;
+            }
+            self.draw_location_marker_at_tip(tip_x, tip_y);
         }
     }
 
-    fn draw_location_marker(&self, marker: LocationMarker) {
-        let (tip_x, tip_y) = self.marker_tip_screen_position(marker);
+    fn draw_location_marker_at_tip(&self, tip_x: f64, tip_y: f64) {
         let (head_center_x, head_center_y) = Self::marker_head_center_from_tip(tip_x, tip_y);
         let tail_top_y = Self::marker_tail_top_y(head_center_y);
 
@@ -1202,9 +1248,9 @@ impl EngineState {
         let world_height = (max_world0_y - min_world0_y).max(1e-12);
         let safe_fit_padding = fit_padding.clamp(0.05, 1.0);
 
-        let target_display_scale =
-            ((self.width / world_width).min(self.height / world_height) * safe_fit_padding)
-                .max(1e-9);
+        let target_display_scale = ((self.width / world_width).min(self.height / world_height)
+            * safe_fit_padding)
+            .max(1e-9);
         let target_zoom = self.zoom_clamp_f64(target_display_scale.log2());
 
         let focus_world0_x = (min_world0_x + max_world0_x) * 0.5;
@@ -1593,17 +1639,47 @@ impl MapEngine {
         let loaded_bounds = trajectory_bounds(&parsed.points);
         {
             let mut state = self.state.borrow_mut();
+            let existing_bounds = state.trajectories_bounds();
             if !parsed.points.is_empty() {
                 state.trajectories.push(parsed.points);
             }
-            if let Some(b) = state.trajectories_bounds() {
-                state.fit_to_bounds(b);
+            if let Some(bounds) = EngineState::merge_bounds(existing_bounds, loaded_bounds) {
+                state.fit_to_bounds(bounds);
             }
         }
 
         let result = CsvLoadResult {
             valid_rows: parsed.valid_rows,
             invalid_rows: parsed.invalid_rows,
+            bounds: loaded_bounds,
+        };
+
+        serde_wasm_bindgen::to_value(&result).map_err(Into::into)
+    }
+
+    pub fn load_marker_csv(&mut self, bytes: Vec<u8>) -> Result<JsValue, JsValue> {
+        let content =
+            String::from_utf8(bytes).map_err(|_| JsValue::from_str("CSV must be valid UTF-8"))?;
+        let parsed = parse_marker_csv(&content);
+        let valid_rows = parsed.valid_rows;
+        let invalid_rows = parsed.invalid_rows;
+        let loaded_bounds = parsed.bounds;
+        let points = parsed.points;
+
+        {
+            let mut state = self.state.borrow_mut();
+            let existing_bounds = state.location_markers_bounds();
+            if !points.is_empty() {
+                state.append_marker_points(points);
+            }
+            if let Some(bounds) = EngineState::merge_bounds(existing_bounds, loaded_bounds) {
+                state.fit_to_bounds(bounds);
+            }
+        }
+
+        let result = CsvLoadResult {
+            valid_rows,
+            invalid_rows,
             bounds: loaded_bounds,
         };
 

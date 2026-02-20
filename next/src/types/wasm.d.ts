@@ -19,6 +19,7 @@ declare module "@/wasm/pkg/map_engine_wasm.js" {
     set_view(lon: number, lat: number, zoom: number): void;
     frame(nowMs: number): void;
     load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
+    load_marker_csv(bytes: Uint8Array): CsvLoadResult;
     clear_trajectory(): void;
     destroy(): void;
   };
@@ -26,4 +27,3 @@ declare module "@/wasm/pkg/map_engine_wasm.js" {
   export function init_engine(canvasOrOffscreen: unknown, config: unknown): MapEngine;
   export default function init(): Promise<void>;
 }
-

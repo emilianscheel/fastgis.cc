@@ -26,6 +26,7 @@ type WasmMapEngine = {
   remove_recent_markers(count: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
+  load_marker_csv(bytes: Uint8Array): CsvLoadResult;
   clear_trajectory(): void;
   set_tile_url_template(template: string): void;
   destroy(): void;
@@ -117,7 +118,7 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
       return;
     }
 
-    if (message.type === "LOAD_TRAJECTORY_CSV") {
+    if (message.type === "LOAD_TRAJECTORY_CSV" || message.type === "LOAD_MARKER_CSV") {
       postMessageToMain({
         type: "ERROR",
         payload: {
@@ -242,6 +243,15 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
 
   if (message.type === "LOAD_TRAJECTORY_CSV") {
     const result = engine.load_trajectory_csv(message.payload.bytes);
+    postMessageToMain({
+      type: "CSV_LOADED",
+      payload: result
+    });
+    return;
+  }
+
+  if (message.type === "LOAD_MARKER_CSV") {
+    const result = engine.load_marker_csv(message.payload.bytes);
     postMessageToMain({
       type: "CSV_LOADED",
       payload: result

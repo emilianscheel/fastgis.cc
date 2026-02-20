@@ -1,7 +1,7 @@
 "use client";
 
 import type * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { BoxZoomRect } from "@/hooks/use-box-zoom-tool";
 import type { MarkerHover } from "@/lib/map-protocol";
@@ -52,6 +52,7 @@ type MapCanvasStageProps = {
 const MARKER_TOOLTIP_BRIDGE_WIDTH_PX = 120;
 const MARKER_TOOLTIP_BRIDGE_HEIGHT_PX = 18;
 const MARKER_TOOLTIP_TRANSITION_MS = 180;
+const MARKER_TOOLTIP_HOVER_GRACE_MS = 260;
 const MARKER_HOVER_REMOVE_TOOLTIP_FROM_ANCHOR_PX = 26;
 const MARKER_HOVER_REMOVE_BRIDGE_FROM_ANCHOR_PX = 0;
 const MARKER_HOVER_REMOVE_BRIDGE_WIDTH_PX = 184;
@@ -77,10 +78,16 @@ function hasSameCoordinates(a: CoordinatesLike, b: CoordinatesLike): boolean {
   );
 }
 
-function useTooltipPresence<T>(value: T | null, getIdentity?: (value: T) => string) {
+function useTooltipPresence<T>(
+  value: T | null,
+  getIdentity?: (value: T) => string,
+  options?: { keepAlive?: boolean }
+) {
+  const keepAlive = options?.keepAlive ?? false;
   const [renderValue, setRenderValue] = useState<T | null>(value);
   const [isVisible, setIsVisible] = useState<boolean>(Boolean(value));
   const identity = value ? (getIdentity ? getIdentity(value) : "present") : null;
+  const activeIdentityRef = useRef<string | null>(identity);
 
   useEffect(() => {
     if (value) {
@@ -90,6 +97,12 @@ function useTooltipPresence<T>(value: T | null, getIdentity?: (value: T) => stri
 
   useEffect(() => {
     if (identity) {
+      const isSameIdentity = activeIdentityRef.current === identity;
+      activeIdentityRef.current = identity;
+      if (isSameIdentity) {
+        return;
+      }
+
       setIsVisible(false);
       const rafId = window.requestAnimationFrame(() => {
         setIsVisible(true);
@@ -99,14 +112,30 @@ function useTooltipPresence<T>(value: T | null, getIdentity?: (value: T) => stri
       };
     }
 
-    setIsVisible(false);
-    const timeoutId = window.setTimeout(() => {
-      setRenderValue(null);
-    }, MARKER_TOOLTIP_TRANSITION_MS);
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
+    activeIdentityRef.current = null;
   }, [identity]);
+
+  useEffect(() => {
+    if (identity) {
+      return;
+    }
+
+    if (keepAlive && renderValue) {
+      setIsVisible(true);
+      return;
+    }
+
+    const hideTimeoutId = window.setTimeout(() => {
+      setIsVisible(false);
+    }, MARKER_TOOLTIP_HOVER_GRACE_MS);
+    const clearTimeoutId = window.setTimeout(() => {
+      setRenderValue(null);
+    }, MARKER_TOOLTIP_HOVER_GRACE_MS + MARKER_TOOLTIP_TRANSITION_MS);
+    return () => {
+      window.clearTimeout(hideTimeoutId);
+      window.clearTimeout(clearTimeoutId);
+    };
+  }, [identity, keepAlive, renderValue]);
 
   return { renderValue, isVisible };
 }
@@ -128,6 +157,9 @@ type HoveredMarkerTooltipsProps = {
   onCopy: (marker: { lat: number; lon: number }) => void;
   onRemove: (marker: { lat: number; lon: number }) => void;
   zIndexClassName?: string;
+  enableHoverCatch?: boolean;
+  onTooltipPointerEnter?: () => void;
+  onTooltipPointerLeave?: () => void;
 };
 
 function HoveredMarkerTooltips({
@@ -135,7 +167,10 @@ function HoveredMarkerTooltips({
   visible,
   onCopy,
   onRemove,
-  zIndexClassName = "z-20"
+  zIndexClassName = "z-20",
+  enableHoverCatch = true,
+  onTooltipPointerEnter,
+  onTooltipPointerLeave
 }: HoveredMarkerTooltipsProps) {
   const markerLabel = `${marker.lat.toFixed(3)}, ${marker.lon.toFixed(3)}`;
 
@@ -144,7 +179,7 @@ function HoveredMarkerTooltips({
       <div
         aria-hidden="true"
         className={cn(
-          "pointer-events-auto absolute z-0 -translate-x-1/2",
+          "pointer-events-none absolute z-0 -translate-x-1/2",
           TOOLTIP_ANIMATION_CLASS_NAME,
           visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
         )}
@@ -171,6 +206,8 @@ function HoveredMarkerTooltips({
             TOOLTIP_ANIMATION_CLASS_NAME,
             visible ? "opacity-100 translate-y-0" : "pointer-events-none opacity-0 translate-y-2"
           )}
+          onPointerEnter={onTooltipPointerEnter}
+          onPointerLeave={onTooltipPointerLeave}
           onClick={() => onCopy(marker)}
           title="Copy coordinates"
         >
@@ -180,7 +217,7 @@ function HoveredMarkerTooltips({
       <div
         aria-hidden="true"
         className={cn(
-          "pointer-events-auto absolute z-0 -translate-x-1/2",
+          "pointer-events-none absolute z-0 -translate-x-1/2",
           "transition-opacity duration-100 ease-out",
           visible ? "opacity-100" : "opacity-0"
         )}
@@ -196,7 +233,7 @@ function HoveredMarkerTooltips({
         aria-hidden="true"
         className={cn(
           "absolute z-[5] -translate-x-1/2",
-          visible ? "pointer-events-auto" : "pointer-events-none"
+          enableHoverCatch && visible ? "pointer-events-auto" : "pointer-events-none"
         )}
         style={{
           left: `${marker.screenX}px`,
@@ -219,6 +256,8 @@ function HoveredMarkerTooltips({
             TOOLTIP_ANIMATION_CLASS_NAME,
             visible ? "opacity-100 translate-y-0" : "pointer-events-none opacity-0 -translate-y-2"
           )}
+          onPointerEnter={onTooltipPointerEnter}
+          onPointerLeave={onTooltipPointerLeave}
           onClick={() => onRemove(marker)}
           title="Remove marker"
         >
@@ -251,6 +290,8 @@ export function MapCanvasStage({
   onRemoveMeasurementMarker,
   onMeasurementDistanceCopy
 }: MapCanvasStageProps) {
+  const [isHoveredTooltipPinned, setIsHoveredTooltipPinned] = useState(false);
+
   const hoveredMeasurementMarker = useMemo<MeasurementMarkerOverlay | null>(() => {
     if (hoveredMeasurementMarkerIndex === null) {
       return null;
@@ -260,16 +301,29 @@ export function MapCanvasStage({
   }, [hoveredMeasurementMarkerIndex, measurementMarkers]);
 
   const { renderValue: markerTooltipMarker, isVisible: isMarkerTooltipVisible } =
-    useTooltipPresence<MarkerHover>(markerHover, markerIdentityKey);
+    useTooltipPresence<MarkerHover>(markerHover, markerIdentityKey, {
+      keepAlive: isHoveredTooltipPinned
+    });
   const { renderValue: rulerTooltipMarker, isVisible: isRulerTooltipVisible } = useTooltipPresence<
     MeasurementMarkerOverlay
-  >(hoveredMeasurementMarker, markerIdentityKey);
+  >(hoveredMeasurementMarker, markerIdentityKey, {
+    keepAlive: isHoveredTooltipPinned
+  });
+
+  useEffect(() => {
+    if (markerTooltipMarker || rulerTooltipMarker) {
+      return;
+    }
+
+    setIsHoveredTooltipPinned(false);
+  }, [markerTooltipMarker, rulerTooltipMarker]);
 
   const activeHoveredTooltip = useMemo<{
     marker: HoverTooltipMarker;
     onCopy: (marker: { lat: number; lon: number }) => void;
     onRemove: (marker: { lat: number; lon: number }) => void;
     visible: boolean;
+    enableHoverCatch: boolean;
   } | null>(() => {
     if (rulerTooltipMarker) {
       return {
@@ -281,7 +335,8 @@ export function MapCanvasStage({
         },
         onCopy: onMeasurementMarkerCopy,
         onRemove: () => onRemoveMeasurementMarker(rulerTooltipMarker.index),
-        visible: isRulerTooltipVisible
+        visible: isRulerTooltipVisible,
+        enableHoverCatch: false
       };
     }
 
@@ -305,7 +360,8 @@ export function MapCanvasStage({
       },
       onCopy: onMarkerHoverCopy,
       onRemove: onMarkerHoverRemove,
-      visible: isMarkerTooltipVisible
+      visible: isMarkerTooltipVisible,
+      enableHoverCatch: true
     };
   }, [
     hoveredMeasurementMarker,
@@ -395,6 +451,9 @@ export function MapCanvasStage({
           visible={activeHoveredTooltip.visible}
           onCopy={activeHoveredTooltip.onCopy}
           onRemove={activeHoveredTooltip.onRemove}
+          enableHoverCatch={activeHoveredTooltip.enableHoverCatch}
+          onTooltipPointerEnter={() => setIsHoveredTooltipPinned(true)}
+          onTooltipPointerLeave={() => setIsHoveredTooltipPinned(false)}
         />
       ) : null}
     </div>

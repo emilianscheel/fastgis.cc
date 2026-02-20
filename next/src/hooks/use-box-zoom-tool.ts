@@ -41,6 +41,10 @@ type UseBoxZoomToolOptions = {
   onClickZoom: (direction: "in" | "out", x: number, y: number) => void;
   onPlaceMarker: (x: number, y: number) => void;
   onPlaceMeasurement: (x: number, y: number) => void;
+  onStartMeasurementMarkerDrag: (x: number, y: number) => boolean;
+  onDragMeasurementMarker: (x: number, y: number) => void;
+  onDropMeasurementMarker: (x: number, y: number) => void;
+  onCancelMeasurementMarkerDrag: () => void;
 };
 
 const DEFAULT_MIN_SELECTION_PX = 12;
@@ -55,17 +59,35 @@ export function useBoxZoomTool({
   onZoomToBox,
   onClickZoom,
   onPlaceMarker,
-  onPlaceMeasurement
+  onPlaceMeasurement,
+  onStartMeasurementMarkerDrag,
+  onDragMeasurementMarker,
+  onDropMeasurementMarker,
+  onCancelMeasurementMarkerDrag
 }: UseBoxZoomToolOptions) {
   const [interactionTool, setInteractionTool] = useState<InteractionTool>("pan");
   const [zoomTool, setZoomTool] = useState<ZoomTool>("default");
   const [boxZoomDrag, setBoxZoomDrag] = useState<BoxZoomDrag | null>(null);
+  const [isDraggingMeasurementMarker, setIsDraggingMeasurementMarker] = useState(false);
 
   useEffect(() => {
     if (zoomTool !== "box-zoom" && boxZoomDrag) {
       setBoxZoomDrag(null);
     }
   }, [boxZoomDrag, zoomTool]);
+
+  useEffect(() => {
+    if (!isDraggingMeasurementMarker) {
+      return;
+    }
+
+    if (interactionTool === "measure") {
+      return;
+    }
+
+    onCancelMeasurementMarkerDrag();
+    setIsDraggingMeasurementMarker(false);
+  }, [interactionTool, isDraggingMeasurementMarker, onCancelMeasurementMarkerDrag]);
 
   const withCanvasPoint = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -110,6 +132,11 @@ export function useBoxZoomTool({
       if (interactionTool === "measure") {
         cancelWheelZoomAnimation();
         onHoverClear();
+        if (canInteract && onStartMeasurementMarkerDrag(x, y)) {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          setIsDraggingMeasurementMarker(true);
+          return;
+        }
         if (canInteract) {
           onPlaceMeasurement(x, y);
         }
@@ -138,6 +165,7 @@ export function useBoxZoomTool({
       interactionTool,
       onHoverClear,
       onHoverPoint,
+      onStartMeasurementMarkerDrag,
       onPlaceMeasurement,
       onPanPointerEvent,
       onClickZoom,
@@ -172,6 +200,10 @@ export function useBoxZoomTool({
       }
 
       if (interactionTool === "measure") {
+        if (isDraggingMeasurementMarker) {
+          onDragMeasurementMarker(x, y);
+          return;
+        }
         onHoverPoint(x, y);
         return;
       }
@@ -179,7 +211,16 @@ export function useBoxZoomTool({
       onHoverPoint(x, y);
       onPanPointerEvent("POINTER_MOVE", x, y, event.button);
     },
-    [interactionTool, onHoverClear, onHoverPoint, onPanPointerEvent, withCanvasPoint, zoomTool]
+    [
+      interactionTool,
+      isDraggingMeasurementMarker,
+      onDragMeasurementMarker,
+      onHoverClear,
+      onHoverPoint,
+      onPanPointerEvent,
+      withCanvasPoint,
+      zoomTool
+    ]
   );
 
   const handleCanvasPointerUp = useCallback(
@@ -218,6 +259,15 @@ export function useBoxZoomTool({
       }
 
       if (interactionTool === "measure") {
+        if (isDraggingMeasurementMarker) {
+          if (canInteract) {
+            onDropMeasurementMarker(x, y);
+          } else {
+            onCancelMeasurementMarkerDrag();
+          }
+          setIsDraggingMeasurementMarker(false);
+          onHoverPoint(x, y);
+        }
         return;
       }
 
@@ -227,7 +277,10 @@ export function useBoxZoomTool({
     [
       canInteract,
       interactionTool,
+      isDraggingMeasurementMarker,
       minSelectionSizePx,
+      onCancelMeasurementMarkerDrag,
+      onDropMeasurementMarker,
       onHoverClear,
       onHoverPoint,
       onPanPointerEvent,
@@ -250,20 +303,36 @@ export function useBoxZoomTool({
       }
 
       if (interactionTool === "measure") {
+        if (isDraggingMeasurementMarker) {
+          onCancelMeasurementMarkerDrag();
+          setIsDraggingMeasurementMarker(false);
+        }
         return;
       }
 
       const { x, y } = withCanvasPoint(event);
       onPanPointerEvent("POINTER_UP", x, y, event.button);
     },
-    [cancelWheelZoomAnimation, interactionTool, onHoverClear, onPanPointerEvent, withCanvasPoint, zoomTool]
+    [
+      cancelWheelZoomAnimation,
+      interactionTool,
+      isDraggingMeasurementMarker,
+      onCancelMeasurementMarkerDrag,
+      onHoverClear,
+      onPanPointerEvent,
+      withCanvasPoint,
+      zoomTool
+    ]
   );
 
   const handleCanvasPointerLeave = useCallback(
     (_event: React.PointerEvent<HTMLDivElement>) => {
+      if (isDraggingMeasurementMarker) {
+        return;
+      }
       onHoverClear();
     },
-    [onHoverClear]
+    [isDraggingMeasurementMarker, onHoverClear]
   );
 
   const boxZoomRect = useMemo<BoxZoomRect | null>(() => {
@@ -289,8 +358,12 @@ export function useBoxZoomTool({
       ? "cursor-zoom-in"
       : zoomTool === "zoom-out"
         ? "cursor-zoom-out"
-        : isBoxZoomActive || isMarkerActive || isMeasurementActive
+        : isBoxZoomActive || isMarkerActive
           ? "cursor-crosshair"
+          : isMeasurementActive
+            ? isDraggingMeasurementMarker
+              ? "cursor-grabbing"
+              : "cursor-crosshair"
           : "cursor-grab active:cursor-grabbing";
 
   const toggleBoxZoomTool = useCallback(() => {
