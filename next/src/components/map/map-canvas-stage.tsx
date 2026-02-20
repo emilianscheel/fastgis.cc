@@ -60,8 +60,8 @@ const MARKER_HOVER_REMOVE_CATCH_FROM_ANCHOR_PX = 0;
 const MARKER_HOVER_REMOVE_CATCH_WIDTH_PX = 220;
 const MARKER_HOVER_REMOVE_CATCH_HEIGHT_PX = 42;
 const MARKER_TOOLTIP_ANCHOR_FROM_TIP_PX = 26;
-const MARKER_PILL_CLASS_NAME =
-  "pointer-events-auto rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] leading-none text-slate-700 shadow-sm";
+const TOOLTIP_PILL_CLASS_NAME =
+  "pointer-events-auto rounded-full border border-border/80 bg-background/95 px-2 py-1 text-[10px] leading-none text-foreground shadow-sm backdrop-blur-sm";
 const TOOLTIP_ANIMATION_CLASS_NAME = "transition-all duration-200 ease-out";
 const MARKER_COORDINATE_MATCH_EPSILON = 1e-6;
 
@@ -166,7 +166,7 @@ function HoveredMarkerTooltips({
         <button
           type="button"
           className={cn(
-            MARKER_PILL_CLASS_NAME,
+            TOOLTIP_PILL_CLASS_NAME,
             "font-mono tabular-nums",
             TOOLTIP_ANIMATION_CLASS_NAME,
             visible ? "opacity-100 translate-y-0" : "pointer-events-none opacity-0 translate-y-2"
@@ -215,7 +215,7 @@ function HoveredMarkerTooltips({
         <button
           type="button"
           className={cn(
-            MARKER_PILL_CLASS_NAME,
+            TOOLTIP_PILL_CLASS_NAME,
             TOOLTIP_ANIMATION_CLASS_NAME,
             visible ? "opacity-100 translate-y-0" : "pointer-events-none opacity-0 -translate-y-2"
           )}
@@ -373,7 +373,10 @@ export function MapCanvasStage({
             <button
               key={`${segment.centerX}-${segment.centerY}-${segment.distanceMeters}-${index}`}
               type="button"
-              className="pointer-events-auto absolute z-20 -translate-x-1/2 -translate-y-1/2 rounded-full border border-slate-200 bg-white px-2 py-1 font-mono text-[10px] leading-none text-slate-700 shadow-sm tabular-nums"
+              className={cn(
+                TOOLTIP_PILL_CLASS_NAME,
+                "absolute z-20 -translate-x-1/2 -translate-y-1/2 font-mono tabular-nums"
+              )}
               style={{
                 left: `${segment.centerX}px`,
                 top: `${segment.centerY}px`
