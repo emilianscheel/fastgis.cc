@@ -61,7 +61,7 @@ const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
 const ZOOM_STEP_DELTA = 1200;
 const ZOOM_STEP_ANIMATION_MS = 300;
 const EARTH_RADIUS_METERS = 6_371_000;
-const MARKER_COORDINATE_MATCH_EPSILON = 1e-9;
+const MARKER_COORDINATE_MATCH_EPSILON = 1e-6;
 const MEASUREMENT_GUIDANCE_TOAST_ID = "measure-distance-guidance";
 const COPIED_DISTANCE_TOAST_ID = "measure-distance-copy";
 
@@ -345,8 +345,9 @@ export function MapShell() {
       measurementPointsRef.current = nextPoints;
       setMeasurementPoints(nextPoints);
       setMeasurementRenderPoints([]);
+      clearMarkerHover();
     },
-    [addMarkerAtLonLat, removeRecentMarkers]
+    [addMarkerAtLonLat, clearMarkerHover, removeRecentMarkers]
   );
 
   useEffect(() => {
@@ -449,7 +450,7 @@ export function MapShell() {
   );
 
   const hoveredMeasurementMarkerIndex = useMemo<number | null>(() => {
-    if (!isMeasurementActive || !markerHover) {
+    if (!markerHover) {
       return null;
     }
 
@@ -462,7 +463,7 @@ export function MapShell() {
     }
 
     return null;
-  }, [isMeasurementActive, markerHover, measurementMarkers]);
+  }, [markerHover, measurementMarkers]);
 
   useEffect(() => {
     if (!isMeasurementActive) {

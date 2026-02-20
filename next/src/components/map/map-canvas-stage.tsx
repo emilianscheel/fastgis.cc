@@ -1,7 +1,7 @@
 "use client";
 
 import type * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { BoxZoomRect } from "@/hooks/use-box-zoom-tool";
 import type { MarkerHover } from "@/lib/map-protocol";
@@ -42,7 +42,7 @@ type MapCanvasStageProps = {
   onPointerUp: (event: React.PointerEvent<HTMLCanvasElement>) => void;
   onPointerCancel: (event: React.PointerEvent<HTMLCanvasElement>) => void;
   onPointerLeave: (event: React.PointerEvent<HTMLDivElement>) => void;
-  onMarkerHoverCopy: (marker: MarkerHover) => void;
+  onMarkerHoverCopy: (marker: { lat: number; lon: number }) => void;
   onMarkerHoverRemove: (marker: { lat: number; lon: number }) => void;
   onMeasurementMarkerCopy: (marker: { lat: number; lon: number }) => void;
   onRemoveMeasurementMarker: (index: number) => void;
@@ -52,9 +52,6 @@ type MapCanvasStageProps = {
 const MARKER_TOOLTIP_BRIDGE_WIDTH_PX = 120;
 const MARKER_TOOLTIP_BRIDGE_HEIGHT_PX = 18;
 const MARKER_TOOLTIP_TRANSITION_MS = 180;
-const RULER_MARKER_COORDS_TOOLTIP_OFFSET_Y_PX = 26;
-const RULER_MARKER_REMOVE_TOOLTIP_OFFSET_Y_PX = 10;
-const RULER_MARKER_REMOVE_BRIDGE_OFFSET_Y_PX = 2;
 const MARKER_HOVER_REMOVE_TOOLTIP_FROM_ANCHOR_PX = 26;
 const MARKER_HOVER_REMOVE_BRIDGE_FROM_ANCHOR_PX = 0;
 const MARKER_HOVER_REMOVE_BRIDGE_WIDTH_PX = 184;
@@ -62,17 +59,44 @@ const MARKER_HOVER_REMOVE_BRIDGE_HEIGHT_PX = 28;
 const MARKER_HOVER_REMOVE_CATCH_FROM_ANCHOR_PX = 0;
 const MARKER_HOVER_REMOVE_CATCH_WIDTH_PX = 220;
 const MARKER_HOVER_REMOVE_CATCH_HEIGHT_PX = 42;
+const MARKER_TOOLTIP_ANCHOR_FROM_TIP_PX = 26;
 const MARKER_PILL_CLASS_NAME =
   "pointer-events-auto rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] leading-none text-slate-700 shadow-sm";
 const TOOLTIP_ANIMATION_CLASS_NAME = "transition-all duration-200 ease-out";
+const MARKER_COORDINATE_MATCH_EPSILON = 1e-6;
 
-function useTooltipPresence<T>(value: T | null) {
+type CoordinatesLike = {
+  lat: number;
+  lon: number;
+};
+
+function hasSameCoordinates(a: CoordinatesLike, b: CoordinatesLike): boolean {
+  return (
+    Math.abs(a.lon - b.lon) <= MARKER_COORDINATE_MATCH_EPSILON &&
+    Math.abs(a.lat - b.lat) <= MARKER_COORDINATE_MATCH_EPSILON
+  );
+}
+
+function useTooltipPresence<T>(value: T | null, isSameValue?: (a: T, b: T) => boolean) {
   const [renderValue, setRenderValue] = useState<T | null>(value);
   const [isVisible, setIsVisible] = useState<boolean>(Boolean(value));
+  const lastVisibleValueRef = useRef<T | null>(value);
 
   useEffect(() => {
     if (value) {
+      const previous = lastVisibleValueRef.current;
+      const isSame =
+        previous &&
+        (isSameValue ? isSameValue(previous, value) : Object.is(previous, value));
+
       setRenderValue(value);
+      lastVisibleValueRef.current = value;
+
+      if (isSame) {
+        setIsVisible(true);
+        return;
+      }
+
       setIsVisible(false);
       const rafId = window.requestAnimationFrame(() => {
         setIsVisible(true);
@@ -83,6 +107,7 @@ function useTooltipPresence<T>(value: T | null) {
     }
 
     setIsVisible(false);
+    lastVisibleValueRef.current = null;
     const timeoutId = window.setTimeout(() => {
       setRenderValue(null);
     }, MARKER_TOOLTIP_TRANSITION_MS);
@@ -90,9 +115,127 @@ function useTooltipPresence<T>(value: T | null) {
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [value]);
+  }, [isSameValue, value]);
 
   return { renderValue, isVisible };
+}
+
+type HoverTooltipMarker = {
+  lat: number;
+  lon: number;
+  screenX: number;
+  screenY: number;
+};
+
+function areSameHoverTooltipMarker(a: HoverTooltipMarker, b: HoverTooltipMarker): boolean {
+  return hasSameCoordinates(a, b);
+}
+
+type HoveredMarkerTooltipsProps = {
+  marker: HoverTooltipMarker;
+  visible: boolean;
+  onCopy: (marker: { lat: number; lon: number }) => void;
+  onRemove: (marker: { lat: number; lon: number }) => void;
+  zIndexClassName?: string;
+};
+
+function HoveredMarkerTooltips({
+  marker,
+  visible,
+  onCopy,
+  onRemove,
+  zIndexClassName = "z-20"
+}: HoveredMarkerTooltipsProps) {
+  const markerLabel = `${marker.lat.toFixed(3)}, ${marker.lon.toFixed(3)}`;
+
+  return (
+    <div className={cn("pointer-events-none absolute inset-0", zIndexClassName)}>
+      <div
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-auto absolute z-0 -translate-x-1/2",
+          TOOLTIP_ANIMATION_CLASS_NAME,
+          visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
+        )}
+        style={{
+          left: `${marker.screenX}px`,
+          top: `${marker.screenY}px`,
+          width: `${MARKER_TOOLTIP_BRIDGE_WIDTH_PX}px`,
+          height: `${MARKER_TOOLTIP_BRIDGE_HEIGHT_PX}px`,
+          clipPath: "polygon(0 0, 100% 0, 50% 100%)"
+        }}
+      />
+      <div
+        className="absolute z-10 -translate-x-1/2 -translate-y-full"
+        style={{
+          left: `${marker.screenX}px`,
+          top: `${marker.screenY}px`
+        }}
+      >
+        <button
+          type="button"
+          className={cn(
+            MARKER_PILL_CLASS_NAME,
+            "font-mono tabular-nums",
+            TOOLTIP_ANIMATION_CLASS_NAME,
+            visible ? "opacity-100 translate-y-0" : "pointer-events-none opacity-0 translate-y-2"
+          )}
+          onClick={() => onCopy(marker)}
+          title="Copy coordinates"
+        >
+          {markerLabel}
+        </button>
+      </div>
+      <div
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-auto absolute z-0 -translate-x-1/2",
+          "transition-opacity duration-100 ease-out",
+          visible ? "opacity-100" : "opacity-0"
+        )}
+        style={{
+          left: `${marker.screenX}px`,
+          top: `${marker.screenY + MARKER_HOVER_REMOVE_BRIDGE_FROM_ANCHOR_PX}px`,
+          width: `${MARKER_HOVER_REMOVE_BRIDGE_WIDTH_PX}px`,
+          height: `${MARKER_HOVER_REMOVE_BRIDGE_HEIGHT_PX}px`,
+          clipPath: "polygon(50% 0, 0 100%, 100% 100%)"
+        }}
+      />
+      <div
+        aria-hidden="true"
+        className={cn(
+          "absolute z-[5] -translate-x-1/2",
+          visible ? "pointer-events-auto" : "pointer-events-none"
+        )}
+        style={{
+          left: `${marker.screenX}px`,
+          top: `${marker.screenY + MARKER_HOVER_REMOVE_CATCH_FROM_ANCHOR_PX}px`,
+          width: `${MARKER_HOVER_REMOVE_CATCH_WIDTH_PX}px`,
+          height: `${MARKER_HOVER_REMOVE_CATCH_HEIGHT_PX}px`
+        }}
+      />
+      <div
+        className="absolute z-10 -translate-x-1/2"
+        style={{
+          left: `${marker.screenX}px`,
+          top: `${marker.screenY + MARKER_HOVER_REMOVE_TOOLTIP_FROM_ANCHOR_PX}px`
+        }}
+      >
+        <button
+          type="button"
+          className={cn(
+            MARKER_PILL_CLASS_NAME,
+            TOOLTIP_ANIMATION_CLASS_NAME,
+            visible ? "opacity-100 translate-y-0" : "pointer-events-none opacity-0 -translate-y-2"
+          )}
+          onClick={() => onRemove(marker)}
+          title="Remove marker"
+        >
+          remove
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export function MapCanvasStage({
@@ -125,19 +268,65 @@ export function MapCanvasStage({
     return measurementMarkers.find((marker) => marker.index === hoveredMeasurementMarkerIndex) ?? null;
   }, [hoveredMeasurementMarkerIndex, measurementMarkers]);
 
-  const { renderValue: markerTooltipMarker, isVisible: isMarkerTooltipVisible } = useTooltipPresence<
-    MarkerHover
-  >(!isMeasurementActive ? markerHover : null);
+  const { renderValue: markerTooltipMarker, isVisible: isMarkerTooltipVisible } =
+    useTooltipPresence<MarkerHover>(markerHover, areSameHoverTooltipMarker);
   const { renderValue: rulerTooltipMarker, isVisible: isRulerTooltipVisible } = useTooltipPresence<
     MeasurementMarkerOverlay
-  >(isMeasurementActive ? hoveredMeasurementMarker : null);
+  >(hoveredMeasurementMarker, areSameHoverTooltipMarker);
 
-  const markerLabel = markerTooltipMarker
-    ? `${markerTooltipMarker.lat.toFixed(3)}, ${markerTooltipMarker.lon.toFixed(3)}`
-    : null;
-  const rulerMarkerLabel = rulerTooltipMarker
-    ? `${rulerTooltipMarker.lat.toFixed(3)}, ${rulerTooltipMarker.lon.toFixed(3)}`
-    : null;
+  const activeHoveredTooltip = useMemo<{
+    marker: HoverTooltipMarker;
+    onCopy: (marker: { lat: number; lon: number }) => void;
+    onRemove: (marker: { lat: number; lon: number }) => void;
+    visible: boolean;
+  } | null>(() => {
+    if (rulerTooltipMarker) {
+      return {
+        marker: {
+          lat: rulerTooltipMarker.lat,
+          lon: rulerTooltipMarker.lon,
+          screenX: rulerTooltipMarker.screenX,
+          screenY: rulerTooltipMarker.screenY - MARKER_TOOLTIP_ANCHOR_FROM_TIP_PX
+        },
+        onCopy: onMeasurementMarkerCopy,
+        onRemove: () => onRemoveMeasurementMarker(rulerTooltipMarker.index),
+        visible: isRulerTooltipVisible
+      };
+    }
+
+    if (!markerTooltipMarker) {
+      return null;
+    }
+
+    if (
+      hoveredMeasurementMarker &&
+      hasSameCoordinates(markerTooltipMarker, hoveredMeasurementMarker)
+    ) {
+      return null;
+    }
+
+    return {
+      marker: {
+        lat: markerTooltipMarker.lat,
+        lon: markerTooltipMarker.lon,
+        screenX: markerTooltipMarker.screenX,
+        screenY: markerTooltipMarker.screenY
+      },
+      onCopy: onMarkerHoverCopy,
+      onRemove: onMarkerHoverRemove,
+      visible: isMarkerTooltipVisible
+    };
+  }, [
+    hoveredMeasurementMarker,
+    isMarkerTooltipVisible,
+    isRulerTooltipVisible,
+    markerTooltipMarker,
+    onMarkerHoverCopy,
+    onMarkerHoverRemove,
+    onMeasurementMarkerCopy,
+    onRemoveMeasurementMarker,
+    rulerTooltipMarker
+  ]);
 
   return (
     <div className="absolute inset-0" onPointerLeave={onPointerLeave}>
@@ -206,191 +395,13 @@ export function MapCanvasStage({
           ))}
         </div>
       ) : null}
-      {rulerTooltipMarker && rulerMarkerLabel ? (
-        <div className="pointer-events-none absolute inset-0 z-20">
-          <div
-            key={`measurement-marker-coords-bridge-${rulerTooltipMarker.index}`}
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-auto absolute z-0 -translate-x-1/2",
-              TOOLTIP_ANIMATION_CLASS_NAME,
-              isRulerTooltipVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-            )}
-            style={{
-              left: `${rulerTooltipMarker.screenX}px`,
-              top: `${rulerTooltipMarker.screenY - RULER_MARKER_COORDS_TOOLTIP_OFFSET_Y_PX}px`,
-              width: `${MARKER_TOOLTIP_BRIDGE_WIDTH_PX}px`,
-              height: `${MARKER_TOOLTIP_BRIDGE_HEIGHT_PX}px`,
-              clipPath: "polygon(0 0, 100% 0, 50% 100%)"
-            }}
-          />
-          <div
-            key={`measurement-marker-coords-${rulerTooltipMarker.index}`}
-            className="absolute z-10 -translate-x-1/2"
-            style={{
-              left: `${rulerTooltipMarker.screenX}px`,
-              top: `${rulerTooltipMarker.screenY - RULER_MARKER_COORDS_TOOLTIP_OFFSET_Y_PX}px`
-            }}
-          >
-            <button
-              type="button"
-              className={cn(
-                MARKER_PILL_CLASS_NAME,
-                "font-mono tabular-nums",
-                TOOLTIP_ANIMATION_CLASS_NAME,
-                isRulerTooltipVisible
-                  ? "opacity-100 translate-y-0"
-                  : "pointer-events-none opacity-0 translate-y-2"
-              )}
-              onClick={() => onMeasurementMarkerCopy(rulerTooltipMarker)}
-              title="Copy coordinates"
-            >
-              {rulerMarkerLabel}
-            </button>
-          </div>
-          <div
-            key={`measurement-marker-remove-bridge-${rulerTooltipMarker.index}`}
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-auto absolute z-0 -translate-x-1/2",
-              TOOLTIP_ANIMATION_CLASS_NAME,
-              isRulerTooltipVisible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2"
-            )}
-            style={{
-              left: `${rulerTooltipMarker.screenX}px`,
-              top: `${rulerTooltipMarker.screenY + RULER_MARKER_REMOVE_BRIDGE_OFFSET_Y_PX}px`,
-              width: `${MARKER_TOOLTIP_BRIDGE_WIDTH_PX}px`,
-              height: `${MARKER_TOOLTIP_BRIDGE_HEIGHT_PX}px`,
-              clipPath: "polygon(50% 0, 0 100%, 100% 100%)"
-            }}
-          >
-            <span />
-          </div>
-          <div
-            key={`measurement-marker-remove-${rulerTooltipMarker.index}`}
-            className="absolute z-10 -translate-x-1/2"
-            style={{
-              left: `${rulerTooltipMarker.screenX}px`,
-              top: `${rulerTooltipMarker.screenY + RULER_MARKER_REMOVE_TOOLTIP_OFFSET_Y_PX}px`
-            }}
-          >
-            <button
-              type="button"
-              className={cn(
-                MARKER_PILL_CLASS_NAME,
-                TOOLTIP_ANIMATION_CLASS_NAME,
-                isRulerTooltipVisible
-                  ? "opacity-100 translate-y-0"
-                  : "pointer-events-none opacity-0 -translate-y-2"
-              )}
-              onClick={() => onRemoveMeasurementMarker(rulerTooltipMarker.index)}
-              title="Remove marker"
-            >
-              remove
-            </button>
-          </div>
-        </div>
-      ) : null}
-      {markerTooltipMarker && markerLabel ? (
-        <div className="pointer-events-none absolute inset-0 z-10">
-          <div
-            data-marker-hover-bridge="true"
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-auto absolute z-0 -translate-x-1/2",
-              TOOLTIP_ANIMATION_CLASS_NAME,
-              isMarkerTooltipVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-            )}
-            style={{
-              left: `${markerTooltipMarker.screenX}px`,
-              top: `${markerTooltipMarker.screenY}px`,
-              width: `${MARKER_TOOLTIP_BRIDGE_WIDTH_PX}px`,
-              height: `${MARKER_TOOLTIP_BRIDGE_HEIGHT_PX}px`,
-              clipPath: "polygon(0 0, 100% 0, 50% 100%)"
-            }}
-          />
-          <div
-            className="absolute z-10 -translate-x-1/2 -translate-y-full"
-            style={{
-              left: `${markerTooltipMarker.screenX}px`,
-              top: `${markerTooltipMarker.screenY}px`
-            }}
-          >
-            <button
-              type="button"
-              data-marker-hover-pill="true"
-              className={cn(
-                MARKER_PILL_CLASS_NAME,
-                "font-mono tabular-nums",
-                TOOLTIP_ANIMATION_CLASS_NAME,
-                isMarkerTooltipVisible
-                  ? "opacity-100 translate-y-0"
-                  : "pointer-events-none opacity-0 translate-y-2"
-              )}
-              onClick={() => onMarkerHoverCopy(markerTooltipMarker)}
-              title="Copy coordinates"
-            >
-              {markerLabel}
-            </button>
-          </div>
-          <div
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-auto absolute z-0 -translate-x-1/2",
-              "transition-opacity duration-100 ease-out",
-              isMarkerTooltipVisible ? "opacity-100" : "opacity-0"
-            )}
-            style={{
-              left: `${markerTooltipMarker.screenX}px`,
-              top: `${markerTooltipMarker.screenY + MARKER_HOVER_REMOVE_BRIDGE_FROM_ANCHOR_PX}px`,
-              width: `${MARKER_HOVER_REMOVE_BRIDGE_WIDTH_PX}px`,
-              height: `${MARKER_HOVER_REMOVE_BRIDGE_HEIGHT_PX}px`,
-              clipPath: "polygon(50% 0, 0 100%, 100% 100%)"
-            }}
-          >
-            <span />
-          </div>
-          <div
-            aria-hidden="true"
-            className={cn(
-              "absolute z-[5] -translate-x-1/2",
-              isMarkerTooltipVisible ? "pointer-events-auto" : "pointer-events-none"
-            )}
-            style={{
-              left: `${markerTooltipMarker.screenX}px`,
-              top: `${markerTooltipMarker.screenY + MARKER_HOVER_REMOVE_CATCH_FROM_ANCHOR_PX}px`,
-              width: `${MARKER_HOVER_REMOVE_CATCH_WIDTH_PX}px`,
-              height: `${MARKER_HOVER_REMOVE_CATCH_HEIGHT_PX}px`
-            }}
-          />
-          <div
-            className="absolute z-10 -translate-x-1/2"
-            style={{
-              left: `${markerTooltipMarker.screenX}px`,
-              top: `${markerTooltipMarker.screenY + MARKER_HOVER_REMOVE_TOOLTIP_FROM_ANCHOR_PX}px`
-            }}
-          >
-            <button
-              type="button"
-              className={cn(
-                MARKER_PILL_CLASS_NAME,
-                TOOLTIP_ANIMATION_CLASS_NAME,
-                isMarkerTooltipVisible
-                  ? "opacity-100 translate-y-0"
-                  : "pointer-events-none opacity-0 -translate-y-2"
-              )}
-              onClick={() =>
-                onMarkerHoverRemove({
-                  lat: markerTooltipMarker.lat,
-                  lon: markerTooltipMarker.lon
-                })
-              }
-              title="Remove marker"
-            >
-              remove
-            </button>
-          </div>
-        </div>
+      {activeHoveredTooltip ? (
+        <HoveredMarkerTooltips
+          marker={activeHoveredTooltip.marker}
+          visible={activeHoveredTooltip.visible}
+          onCopy={activeHoveredTooltip.onCopy}
+          onRemove={activeHoveredTooltip.onRemove}
+        />
       ) : null}
     </div>
   );
