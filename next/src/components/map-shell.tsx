@@ -9,6 +9,7 @@ import { MapToolbar, type MapStyleOption } from "@/components/map/map-toolbar";
 import { useBoxZoomTool } from "@/hooks/use-box-zoom-tool";
 import { useMapEngineRuntime } from "@/hooks/use-map-engine-runtime";
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
+import { appToast } from "@/lib/app-toast";
 import type { InitConfig } from "@/lib/map-protocol";
 
 type MapStyle = MapStyleOption & {
@@ -147,10 +148,12 @@ export function MapShell() {
   });
 
   const handleMarkerHoverCopy = useCallback(async (marker: { lat: number; lon: number }) => {
-    const coordinates = `${marker.lat.toFixed(6)}, ${marker.lon.toFixed(6)}`;
+    const coordinates = `${marker.lat}, ${marker.lon}`;
     try {
       await navigator.clipboard.writeText(coordinates);
+      appToast.copiedCoordinates(marker.lat, marker.lon);
     } catch (error) {
+      appToast.error("Failed to copy coordinates to clipboard.");
       console.error("Failed to copy marker coordinates.", error);
     }
   }, []);

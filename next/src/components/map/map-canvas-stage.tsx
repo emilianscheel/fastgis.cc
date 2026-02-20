@@ -20,6 +20,9 @@ type MapCanvasStageProps = {
   onMarkerHoverCopy: (marker: MarkerHover) => void;
 };
 
+const MARKER_TOOLTIP_BRIDGE_WIDTH_PX = 120;
+const MARKER_TOOLTIP_BRIDGE_HEIGHT_PX = 18;
+
 export function MapCanvasStage({
   stageRef,
   canvasRef,
@@ -35,12 +38,12 @@ export function MapCanvasStage({
   onMarkerHoverCopy
 }: MapCanvasStageProps) {
   const markerLabel = markerHover
-    ? `WGS84 ${markerHover.lat.toFixed(6)}, ${markerHover.lon.toFixed(6)}`
+    ? `${markerHover.lat.toFixed(3)}, ${markerHover.lon.toFixed(3)}`
     : null;
 
   return (
-    <>
-      <div ref={stageRef} className="absolute inset-0" onPointerLeave={onPointerLeave}>
+    <div className="absolute inset-0" onPointerLeave={onPointerLeave}>
+      <div ref={stageRef} className="absolute inset-0">
         <canvas
           key={canvasKey}
           ref={canvasRef}
@@ -67,21 +70,33 @@ export function MapCanvasStage({
       ) : null}
       {markerHover && markerLabel ? (
         <div className="pointer-events-none absolute inset-0 z-10">
+          <div
+            data-marker-hover-bridge="true"
+            aria-hidden="true"
+            className="pointer-events-auto absolute z-0 -translate-x-1/2"
+            style={{
+              left: `${markerHover.screenX}px`,
+              top: `${markerHover.screenY}px`,
+              width: `${MARKER_TOOLTIP_BRIDGE_WIDTH_PX}px`,
+              height: `${MARKER_TOOLTIP_BRIDGE_HEIGHT_PX}px`,
+              clipPath: "polygon(0 0, 100% 0, 50% 100%)"
+            }}
+          />
           <button
             type="button"
             data-marker-hover-pill="true"
-            className="pointer-events-auto absolute -translate-x-1/2 -translate-y-full rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] leading-none text-slate-700 shadow-sm"
+            className="pointer-events-auto absolute z-10 -translate-x-1/2 -translate-y-full rounded-full border border-slate-200 bg-white px-2 py-1 font-mono text-[10px] leading-none text-slate-700 shadow-sm tabular-nums"
             style={{
               left: `${markerHover.screenX}px`,
               top: `${markerHover.screenY}px`
             }}
             onClick={() => onMarkerHoverCopy(markerHover)}
-            title="Copy WGS84 coordinates"
+            title="Copy coordinates"
           >
             {markerLabel}
           </button>
         </div>
       ) : null}
-    </>
+    </div>
   );
 }
