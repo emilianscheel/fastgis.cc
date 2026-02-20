@@ -1,7 +1,7 @@
 "use client";
 
 import type * as React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { BoxZoomRect } from "@/hooks/use-box-zoom-tool";
 import type { MarkerHover } from "@/lib/map-protocol";
@@ -77,26 +77,19 @@ function hasSameCoordinates(a: CoordinatesLike, b: CoordinatesLike): boolean {
   );
 }
 
-function useTooltipPresence<T>(value: T | null, isSameValue?: (a: T, b: T) => boolean) {
+function useTooltipPresence<T>(value: T | null, getIdentity?: (value: T) => string) {
   const [renderValue, setRenderValue] = useState<T | null>(value);
   const [isVisible, setIsVisible] = useState<boolean>(Boolean(value));
-  const lastVisibleValueRef = useRef<T | null>(value);
+  const identity = value ? (getIdentity ? getIdentity(value) : "present") : null;
 
   useEffect(() => {
     if (value) {
-      const previous = lastVisibleValueRef.current;
-      const isSame =
-        previous &&
-        (isSameValue ? isSameValue(previous, value) : Object.is(previous, value));
-
       setRenderValue(value);
-      lastVisibleValueRef.current = value;
+    }
+  }, [value]);
 
-      if (isSame) {
-        setIsVisible(true);
-        return;
-      }
-
+  useEffect(() => {
+    if (identity) {
       setIsVisible(false);
       const rafId = window.requestAnimationFrame(() => {
         setIsVisible(true);
@@ -107,15 +100,13 @@ function useTooltipPresence<T>(value: T | null, isSameValue?: (a: T, b: T) => bo
     }
 
     setIsVisible(false);
-    lastVisibleValueRef.current = null;
     const timeoutId = window.setTimeout(() => {
       setRenderValue(null);
     }, MARKER_TOOLTIP_TRANSITION_MS);
-
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [isSameValue, value]);
+  }, [identity]);
 
   return { renderValue, isVisible };
 }
@@ -127,8 +118,8 @@ type HoverTooltipMarker = {
   screenY: number;
 };
 
-function areSameHoverTooltipMarker(a: HoverTooltipMarker, b: HoverTooltipMarker): boolean {
-  return hasSameCoordinates(a, b);
+function markerIdentityKey(marker: CoordinatesLike): string {
+  return `${marker.lat.toFixed(6)}:${marker.lon.toFixed(6)}`;
 }
 
 type HoveredMarkerTooltipsProps = {
@@ -269,10 +260,10 @@ export function MapCanvasStage({
   }, [hoveredMeasurementMarkerIndex, measurementMarkers]);
 
   const { renderValue: markerTooltipMarker, isVisible: isMarkerTooltipVisible } =
-    useTooltipPresence<MarkerHover>(markerHover, areSameHoverTooltipMarker);
+    useTooltipPresence<MarkerHover>(markerHover, markerIdentityKey);
   const { renderValue: rulerTooltipMarker, isVisible: isRulerTooltipVisible } = useTooltipPresence<
     MeasurementMarkerOverlay
-  >(hoveredMeasurementMarker, areSameHoverTooltipMarker);
+  >(hoveredMeasurementMarker, markerIdentityKey);
 
   const activeHoveredTooltip = useMemo<{
     marker: HoverTooltipMarker;
