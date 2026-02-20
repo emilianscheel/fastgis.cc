@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 type PointerMessageType = "POINTER_DOWN" | "POINTER_MOVE" | "POINTER_UP";
 type InteractionTool = "pan" | "marker" | "measure";
-type ZoomTool = "default" | "box-zoom";
+type ZoomTool = "default" | "box-zoom" | "zoom-in" | "zoom-out";
 type BoxZoomDrag = {
   startX: number;
   startY: number;
@@ -38,6 +38,7 @@ type UseBoxZoomToolOptions = {
     endX: number,
     endY: number
   ) => void;
+  onClickZoom: (direction: "in" | "out", x: number, y: number) => void;
   onPlaceMarker: (x: number, y: number) => void;
   onPlaceMeasurement: (x: number, y: number) => void;
 };
@@ -52,6 +53,7 @@ export function useBoxZoomTool({
   onHoverClear,
   onPanPointerEvent,
   onZoomToBox,
+  onClickZoom,
   onPlaceMarker,
   onPlaceMeasurement
 }: UseBoxZoomToolOptions) {
@@ -96,6 +98,14 @@ export function useBoxZoomTool({
         });
         return;
       }
+      if (zoomTool === "zoom-in" || zoomTool === "zoom-out") {
+        cancelWheelZoomAnimation();
+        onHoverClear();
+        if (canInteract) {
+          onClickZoom(zoomTool === "zoom-in" ? "in" : "out", x, y);
+        }
+        return;
+      }
 
       if (interactionTool === "measure") {
         cancelWheelZoomAnimation();
@@ -130,6 +140,7 @@ export function useBoxZoomTool({
       onHoverPoint,
       onPlaceMeasurement,
       onPanPointerEvent,
+      onClickZoom,
       onPlaceMarker,
       withCanvasPoint,
       zoomTool
@@ -153,6 +164,10 @@ export function useBoxZoomTool({
             currentY: y
           };
         });
+        return;
+      }
+      if (zoomTool === "zoom-in" || zoomTool === "zoom-out") {
+        onHoverPoint(x, y);
         return;
       }
 
@@ -197,6 +212,10 @@ export function useBoxZoomTool({
         });
         return;
       }
+      if (zoomTool === "zoom-in" || zoomTool === "zoom-out") {
+        onHoverPoint(x, y);
+        return;
+      }
 
       if (interactionTool === "measure") {
         return;
@@ -224,6 +243,9 @@ export function useBoxZoomTool({
       if (zoomTool === "box-zoom") {
         cancelWheelZoomAnimation();
         setBoxZoomDrag(null);
+        return;
+      }
+      if (zoomTool === "zoom-in" || zoomTool === "zoom-out") {
         return;
       }
 
@@ -258,11 +280,18 @@ export function useBoxZoomTool({
   }, [boxZoomDrag]);
 
   const isBoxZoomActive = zoomTool === "box-zoom";
+  const isZoomInToolActive = zoomTool === "zoom-in";
+  const isZoomOutToolActive = zoomTool === "zoom-out";
   const isMarkerActive = interactionTool === "marker";
   const isMeasurementActive = interactionTool === "measure";
-  const canvasCursorClassName = isBoxZoomActive || isMarkerActive || isMeasurementActive
-    ? "cursor-crosshair"
-    : "cursor-grab active:cursor-grabbing";
+  const canvasCursorClassName =
+    zoomTool === "zoom-in"
+      ? "cursor-zoom-in"
+      : zoomTool === "zoom-out"
+        ? "cursor-zoom-out"
+        : isBoxZoomActive || isMarkerActive || isMeasurementActive
+          ? "cursor-crosshair"
+          : "cursor-grab active:cursor-grabbing";
 
   const toggleBoxZoomTool = useCallback(() => {
     setZoomTool((current) => {
@@ -297,15 +326,41 @@ export function useBoxZoomTool({
     });
   }, [cancelWheelZoomAnimation, onHoverClear]);
 
+  const toggleZoomInTool = useCallback(() => {
+    setZoomTool((current) => {
+      const next = current === "zoom-in" ? "default" : "zoom-in";
+      if (next === "zoom-in") {
+        cancelWheelZoomAnimation();
+        onHoverClear();
+      }
+      return next;
+    });
+  }, [cancelWheelZoomAnimation, onHoverClear]);
+
+  const toggleZoomOutTool = useCallback(() => {
+    setZoomTool((current) => {
+      const next = current === "zoom-out" ? "default" : "zoom-out";
+      if (next === "zoom-out") {
+        cancelWheelZoomAnimation();
+        onHoverClear();
+      }
+      return next;
+    });
+  }, [cancelWheelZoomAnimation, onHoverClear]);
+
   return {
     interactionTool,
     zoomTool,
     isBoxZoomActive,
+    isZoomInToolActive,
+    isZoomOutToolActive,
     isMarkerActive,
     isMeasurementActive,
     boxZoomRect,
     canvasCursorClassName,
     toggleBoxZoomTool,
+    toggleZoomInTool,
+    toggleZoomOutTool,
     toggleMarkerTool,
     toggleMeasurementTool,
     handleCanvasPointerDown,

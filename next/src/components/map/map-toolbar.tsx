@@ -1,6 +1,6 @@
 "use client";
 
-import { Crop, MapPin, Minus, Plus, Ruler } from "lucide-react";
+import { Crop, MapPin, Minus, Plus, Ruler, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -23,10 +23,14 @@ type MapToolbarProps = {
   mapStyleId: string;
   mapStyles: MapStyleOption[];
   isBoxZoomActive: boolean;
+  isZoomInToolActive: boolean;
+  isZoomOutToolActive: boolean;
   isMarkerActive: boolean;
   isMeasurementActive: boolean;
   onMapStyleChange: (value: string) => void;
   onToggleBoxZoom: () => void;
+  onToggleZoomInTool: () => void;
+  onToggleZoomOutTool: () => void;
   onToggleMarker: () => void;
   onToggleMeasurement: () => void;
   onZoomIn: () => void;
@@ -39,10 +43,14 @@ export function MapToolbar({
   mapStyleId,
   mapStyles,
   isBoxZoomActive,
+  isZoomInToolActive,
+  isZoomOutToolActive,
   isMarkerActive,
   isMeasurementActive,
   onMapStyleChange,
   onToggleBoxZoom,
+  onToggleZoomInTool,
+  onToggleZoomOutTool,
   onToggleMarker,
   onToggleMeasurement,
   onZoomIn,
@@ -102,6 +110,36 @@ export function MapToolbar({
             title="Measure distance tool"
           >
             <Ruler className="h-4 w-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={`h-9 w-9 rounded-none border-border/80 p-0 text-foreground hover:bg-muted/60 ${
+              isZoomInToolActive ? "bg-muted" : "bg-background"
+            }`}
+            onClick={onToggleZoomInTool}
+            disabled={!canInteract}
+            aria-label="Zoom-in click tool"
+            aria-pressed={isZoomInToolActive}
+            title="Zoom-in click tool"
+          >
+            <ZoomIn className="h-4 w-4" aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={`h-9 w-9 rounded-none border-border/80 p-0 text-foreground hover:bg-muted/60 ${
+              isZoomOutToolActive ? "bg-muted" : "bg-background"
+            }`}
+            onClick={onToggleZoomOutTool}
+            disabled={!canInteract}
+            aria-label="Zoom-out click tool"
+            aria-pressed={isZoomOutToolActive}
+            title="Zoom-out click tool"
+          >
+            <ZoomOut className="h-4 w-4" aria-hidden="true" />
           </Button>
           <Button
             type="button"

@@ -193,6 +193,41 @@ export function MapShell() {
     [stopZoomAnimation, zoomToBox]
   );
 
+  const stepZoom = useCallback(
+    (direction: "in" | "out", focusPoint?: { x: number; y: number }) => {
+      if (!canInteract) return;
+
+      stopZoomAnimation();
+
+      const { width, height } = viewportSize();
+      const centerX = focusPoint?.x ?? width / 2;
+      const centerY = focusPoint?.y ?? height / 2;
+      const targetDelta = direction === "in" ? -ZOOM_STEP_DELTA : ZOOM_STEP_DELTA;
+      const startTime = performance.now();
+      let lastEasedProgress = 0;
+
+      const tick = (now: number) => {
+        const elapsed = now - startTime;
+        const progress = Math.min(1, elapsed / ZOOM_STEP_ANIMATION_MS);
+        const easedProgress = 1 - Math.pow(1 - progress, 3);
+        const frameDelta = (easedProgress - lastEasedProgress) * targetDelta;
+        lastEasedProgress = easedProgress;
+
+        applyWheel(frameDelta, centerX, centerY);
+
+        if (progress < 1) {
+          zoomAnimationRef.current = window.requestAnimationFrame(tick);
+          return;
+        }
+
+        zoomAnimationRef.current = null;
+      };
+
+      zoomAnimationRef.current = window.requestAnimationFrame(tick);
+    },
+    [applyWheel, canInteract, stopZoomAnimation, viewportSize]
+  );
+
   const [measurementPoints, setMeasurementPoints] = useState<PlacedMarker[]>([]);
   const [measurementRenderPoints, setMeasurementRenderPoints] = useState<MeasurementRenderPoint[]>([]);
   const measurementSessionIdRef = useRef(0);
@@ -241,11 +276,15 @@ export function MapShell() {
 
   const {
     isBoxZoomActive,
+    isZoomInToolActive,
+    isZoomOutToolActive,
     isMarkerActive,
     isMeasurementActive,
     boxZoomRect,
     canvasCursorClassName,
     toggleBoxZoomTool,
+    toggleZoomInTool,
+    toggleZoomOutTool,
     toggleMarkerTool,
     toggleMeasurementTool,
     handleCanvasPointerDown,
@@ -260,6 +299,9 @@ export function MapShell() {
     onHoverClear: clearMarkerHover,
     onPanPointerEvent: sendPointerEvent,
     onZoomToBox: handleZoomToBox,
+    onClickZoom: (direction, x, y) => {
+      stepZoom(direction, { x, y });
+    },
     onPlaceMarker: placeMarker,
     onPlaceMeasurement: handlePlaceMeasurement
   });
@@ -522,41 +564,6 @@ export function MapShell() {
     }
   }, []);
 
-  const stepZoom = useCallback(
-    (direction: "in" | "out") => {
-      if (!canInteract) return;
-
-      stopZoomAnimation();
-
-      const { width, height } = viewportSize();
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const targetDelta = direction === "in" ? -ZOOM_STEP_DELTA : ZOOM_STEP_DELTA;
-      const startTime = performance.now();
-      let lastEasedProgress = 0;
-
-      const tick = (now: number) => {
-        const elapsed = now - startTime;
-        const progress = Math.min(1, elapsed / ZOOM_STEP_ANIMATION_MS);
-        const easedProgress = 1 - Math.pow(1 - progress, 3);
-        const frameDelta = (easedProgress - lastEasedProgress) * targetDelta;
-        lastEasedProgress = easedProgress;
-
-        applyWheel(frameDelta, centerX, centerY);
-
-        if (progress < 1) {
-          zoomAnimationRef.current = window.requestAnimationFrame(tick);
-          return;
-        }
-
-        zoomAnimationRef.current = null;
-      };
-
-      zoomAnimationRef.current = window.requestAnimationFrame(tick);
-    },
-    [applyWheel, canInteract, stopZoomAnimation, viewportSize]
-  );
-
   const handleZoomIn = useCallback(() => {
     stepZoom("in");
   }, [stepZoom]);
@@ -640,10 +647,14 @@ export function MapShell() {
         mapStyleId={mapStyleId}
         mapStyles={MAP_STYLES}
         isBoxZoomActive={isBoxZoomActive}
+        isZoomInToolActive={isZoomInToolActive}
+        isZoomOutToolActive={isZoomOutToolActive}
         isMarkerActive={isMarkerActive}
         isMeasurementActive={isMeasurementActive}
         onMapStyleChange={handleMapStyleChange}
         onToggleBoxZoom={toggleBoxZoomTool}
+        onToggleZoomInTool={toggleZoomInTool}
+        onToggleZoomOutTool={toggleZoomOutTool}
         onToggleMarker={toggleMarkerTool}
         onToggleMeasurement={toggleMeasurementTool}
         onZoomIn={handleZoomIn}
