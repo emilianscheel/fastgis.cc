@@ -17,6 +17,7 @@ use web_sys::{
     OffscreenCanvasRenderingContext2d, WebGl2RenderingContext, WebGlBuffer, WebGlProgram,
     WebGlShader, WebGlUniformLocation,
 };
+use earcutr::earcut;
 
 static PANIC_HOOK: Once = Once::new();
 const WHEEL_ZOOM_SENSITIVITY: f64 = 1.0 / 1000.0;
@@ -26,6 +27,12 @@ const TILE_DRAW_OVERLAP_PX: f64 = 1.0;
 const MAX_IN_FLIGHT_REQUESTS: usize = 8;
 const VOID_COLOR_BLEND_ALPHA: f64 = 0.25;
 const BOX_ZOOM_FIT_PADDING: f64 = 0.9;
+const VECTOR_COARSE_WATER_TILE_SIZE_CSS_PX: f64 = 320.0;
+const VECTOR_COARSE_WATER_TILE_SIZE_ACTIVE_ZOOM_CSS_PX: f64 = 420.0;
+const VECTOR_COARSE_WATER_TILE_SIZE_FALLBACK_CSS_PX: f64 = 560.0;
+const VECTOR_COARSE_WATER_SIMPLIFY_TOLERANCE: f32 = 0.0045;
+const VECTOR_COARSE_WATER_MIN_POLYGON_POINTS: usize = 24;
+const VECTOR_COARSE_WATER_MIN_SAVINGS_RATIO: f32 = 0.15;
 const TRAJECTORY_FIT_PADDING: f64 = 0.8;
 const VIEW_ANIMATION_DURATION_MS: f64 = 300.0;
 const LOCATION_MARKER_HEAD_RADIUS_PX: f64 = 8.0;
@@ -1547,8 +1554,14 @@ impl VectorBackendKind {
 }
 
 #[derive(Clone, Default)]
+struct VectorPolygon {
+    // First ring is outer boundary; subsequent rings are holes.
+    rings: Vec<Vec<[f32; 2]>>,
+}
+
+#[derive(Clone, Default)]
 struct VectorTileScene {
-    water_polygons: Vec<Vec<[f32; 2]>>,
+    water_polygons: Vec<VectorPolygon>,
     transportation_lines: Vec<Vec<[f32; 2]>>,
 }
 
@@ -1556,6 +1569,7 @@ struct VectorTileScene {
 struct PreparedVectorTileGeometry {
     // Tile-local normalized coordinates (0..1), flattened as x,y pairs.
     water_triangles: Vec<f32>,
+    water_triangles_coarse: Vec<f32>,
     transportation_segments: Vec<f32>,
 }
 
@@ -1574,28 +1588,24 @@ struct SimpleGlPainter {
 struct TileGlBuffers {
     water_buffer: Option<WebGlBuffer>,
     water_vertex_count: i32,
+    water_coarse_buffer: Option<WebGlBuffer>,
+    water_coarse_vertex_count: i32,
     transportation_buffer: Option<WebGlBuffer>,
     transportation_vertex_count: i32,
 }
 
-fn build_prepared_vector_tile_geometry(scene: &VectorTileScene) -> PreparedVectorTileGeometry {
+fn build_prepared_vector_tile_geometry(
+    scene: &VectorTileScene,
+    build_coarse_water_mesh: bool,
+) -> PreparedVectorTileGeometry {
     let mut prepared = PreparedVectorTileGeometry::default();
 
-    for ring in &scene.water_polygons {
-        if ring.len() < 3 {
-            continue;
-        }
+    for polygon in &scene.water_polygons {
+        append_tessellated_polygon_rings(&polygon.rings, &mut prepared.water_triangles);
+    }
 
-        // Naive triangle fan triangulation. Cached once per tile to avoid repeating this
-        // work every frame during pan/zoom.
-        let first = ring[0];
-        for index in 1..(ring.len().saturating_sub(1)) {
-            let b = ring[index];
-            let c = ring[index + 1];
-            prepared
-                .water_triangles
-                .extend_from_slice(&[first[0], first[1], b[0], b[1], c[0], c[1]]);
-        }
+    if build_coarse_water_mesh {
+        prepared.water_triangles_coarse = build_coarse_water_triangles(scene, &prepared.water_triangles);
     }
 
     for path in &scene.transportation_lines {
@@ -1691,6 +1701,8 @@ fn build_tile_gl_buffers(gl: &WebGl2RenderingContext, prepared: &PreparedVectorT
     TileGlBuffers {
         water_vertex_count: (prepared.water_triangles.len() / 2) as i32,
         water_buffer: upload_static_gl_buffer(gl, &prepared.water_triangles),
+        water_coarse_vertex_count: (prepared.water_triangles_coarse.len() / 2) as i32,
+        water_coarse_buffer: upload_static_gl_buffer(gl, &prepared.water_triangles_coarse),
         transportation_vertex_count: (prepared.transportation_segments.len() / 2) as i32,
         transportation_buffer: upload_static_gl_buffer(gl, &prepared.transportation_segments),
     }
@@ -1990,6 +2002,302 @@ fn normalize_mvt_path(path: &[(i32, i32)], extent: u32) -> Vec<[f32; 2]> {
         .collect()
 }
 
+fn ring_signed_area(ring: &[[f32; 2]]) -> f64 {
+    if ring.len() < 3 {
+        return 0.0;
+    }
+
+    let mut area = 0.0_f64;
+    for i in 0..ring.len() {
+        let a = ring[i];
+        let b = ring[(i + 1) % ring.len()];
+        area += f64::from(a[0]) * f64::from(b[1]) - f64::from(b[0]) * f64::from(a[1]);
+    }
+    area * 0.5
+}
+
+fn points_equal_2d(a: [f32; 2], b: [f32; 2]) -> bool {
+    (a[0] - b[0]).abs() <= f32::EPSILON && (a[1] - b[1]).abs() <= f32::EPSILON
+}
+
+fn point_to_segment_distance_sq(point: [f32; 2], seg_a: [f32; 2], seg_b: [f32; 2]) -> f64 {
+    let px = f64::from(point[0]);
+    let py = f64::from(point[1]);
+    let ax = f64::from(seg_a[0]);
+    let ay = f64::from(seg_a[1]);
+    let bx = f64::from(seg_b[0]);
+    let by = f64::from(seg_b[1]);
+    let abx = bx - ax;
+    let aby = by - ay;
+    let apx = px - ax;
+    let apy = py - ay;
+    let ab_len_sq = abx * abx + aby * aby;
+
+    if ab_len_sq <= 1e-18 {
+        return apx * apx + apy * apy;
+    }
+
+    let t = ((apx * abx + apy * aby) / ab_len_sq).clamp(0.0, 1.0);
+    let cx = ax + t * abx;
+    let cy = ay + t * aby;
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy
+}
+
+fn simplify_open_polyline_rdp(points: &[[f32; 2]], tolerance: f32) -> Vec<[f32; 2]> {
+    if points.len() <= 2 || tolerance <= 0.0 {
+        return points.to_vec();
+    }
+
+    let mut keep = vec![false; points.len()];
+    let last_index = points.len() - 1;
+    keep[0] = true;
+    keep[last_index] = true;
+
+    let mut stack = vec![(0usize, last_index)];
+    let tolerance_sq = f64::from(tolerance) * f64::from(tolerance);
+
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+
+        let mut max_distance_sq = -1.0_f64;
+        let mut max_index = start;
+        for i in (start + 1)..end {
+            let distance_sq = point_to_segment_distance_sq(points[i], points[start], points[end]);
+            if distance_sq > max_distance_sq {
+                max_distance_sq = distance_sq;
+                max_index = i;
+            }
+        }
+
+        if max_distance_sq > tolerance_sq {
+            keep[max_index] = true;
+            stack.push((start, max_index));
+            stack.push((max_index, end));
+        }
+    }
+
+    let mut out = Vec::with_capacity(points.len());
+    for (i, point) in points.iter().enumerate() {
+        if keep[i] {
+            out.push(*point);
+        }
+    }
+    out
+}
+
+fn simplify_polygon_ring_closed(ring: &[[f32; 2]], tolerance: f32) -> Vec<[f32; 2]> {
+    if ring.len() <= 4 || tolerance <= 0.0 {
+        return ring.to_vec();
+    }
+
+    let mut closed = Vec::with_capacity(ring.len() + 1);
+    closed.extend_from_slice(ring);
+    closed.push(ring[0]);
+
+    let mut simplified = simplify_open_polyline_rdp(&closed, tolerance);
+    if simplified.len() >= 2 {
+        let last = simplified[simplified.len() - 1];
+        if points_equal_2d(simplified[0], last) {
+            simplified.pop();
+        }
+    }
+
+    if simplified.len() < 3 {
+        return ring.to_vec();
+    }
+
+    if ring_signed_area(&simplified).abs() < 1e-9 {
+        return ring.to_vec();
+    }
+
+    simplified
+}
+
+fn simplify_polygon_rings_for_coarse_water(
+    rings: &[Vec<[f32; 2]>],
+) -> Option<Vec<Vec<[f32; 2]>>> {
+    if rings.is_empty() {
+        return None;
+    }
+
+    let total_points: usize = rings.iter().map(Vec::len).sum();
+    if total_points < VECTOR_COARSE_WATER_MIN_POLYGON_POINTS {
+        return None;
+    }
+
+    let mut simplified_rings = Vec::with_capacity(rings.len());
+    let mut simplified_points = 0usize;
+    for (index, ring) in rings.iter().enumerate() {
+        if ring.len() < 3 {
+            continue;
+        }
+        // Preserve holes slightly more detail than outer rings.
+        let tolerance = if index == 0 {
+            VECTOR_COARSE_WATER_SIMPLIFY_TOLERANCE
+        } else {
+            VECTOR_COARSE_WATER_SIMPLIFY_TOLERANCE * 0.7
+        };
+        let simplified = simplify_polygon_ring_closed(ring, tolerance);
+        simplified_points += simplified.len();
+        if simplified.len() >= 3 {
+            simplified_rings.push(simplified);
+        }
+    }
+
+    if simplified_rings.is_empty() {
+        return None;
+    }
+
+    let savings_ratio = if total_points == 0 {
+        0.0
+    } else {
+        1.0 - (simplified_points as f32 / total_points as f32)
+    };
+    if savings_ratio < VECTOR_COARSE_WATER_MIN_SAVINGS_RATIO {
+        return None;
+    }
+
+    Some(simplified_rings)
+}
+
+fn build_coarse_water_triangles(scene: &VectorTileScene, full_water_triangles: &[f32]) -> Vec<f32> {
+    let mut coarse = Vec::new();
+
+    for polygon in &scene.water_polygons {
+        if let Some(simplified_rings) = simplify_polygon_rings_for_coarse_water(&polygon.rings) {
+            let before_len = coarse.len();
+            if try_append_tessellated_polygon_rings(&simplified_rings, &mut coarse) {
+                continue;
+            }
+            coarse.truncate(before_len);
+        }
+        append_tessellated_polygon_rings(&polygon.rings, &mut coarse);
+    }
+
+    if coarse.is_empty() || coarse.len() >= full_water_triangles.len() {
+        return Vec::new();
+    }
+
+    coarse
+}
+
+fn group_polygon_feature_rings(rings: Vec<Vec<[f32; 2]>>) -> Vec<VectorPolygon> {
+    let mut grouped: Vec<VectorPolygon> = Vec::new();
+    let mut current: Option<VectorPolygon> = None;
+    let mut outer_sign: i8 = 0;
+
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+
+        let area = ring_signed_area(&ring);
+        if area.abs() < 1e-9 {
+            continue;
+        }
+        let sign = if area > 0.0 { 1 } else { -1 };
+
+        if outer_sign == 0 {
+            outer_sign = sign;
+            current = Some(VectorPolygon { rings: vec![ring] });
+            continue;
+        }
+
+        if sign == outer_sign {
+            if let Some(polygon) = current.take() {
+                grouped.push(polygon);
+            }
+            current = Some(VectorPolygon { rings: vec![ring] });
+        } else if let Some(polygon) = current.as_mut() {
+            polygon.rings.push(ring);
+        } else {
+            // Fallback if input ring ordering is unexpected.
+            outer_sign = sign;
+            current = Some(VectorPolygon { rings: vec![ring] });
+        }
+    }
+
+    if let Some(polygon) = current {
+        grouped.push(polygon);
+    }
+
+    grouped
+}
+
+fn try_append_tessellated_polygon_rings(
+    rings: &[Vec<[f32; 2]>],
+    out_triangles: &mut Vec<f32>,
+) -> bool {
+    if rings.is_empty() {
+        return false;
+    }
+
+    let mut coords_flat: Vec<f64> = Vec::new();
+    let mut hole_indices: Vec<usize> = Vec::new();
+    let mut vertex_count = 0usize;
+
+    for (ring_index, ring) in rings.iter().enumerate() {
+        if ring.len() < 3 {
+            continue;
+        }
+
+        if ring_index > 0 {
+            hole_indices.push(vertex_count);
+        }
+
+        for point in ring {
+            coords_flat.push(f64::from(point[0]));
+            coords_flat.push(f64::from(point[1]));
+            vertex_count += 1;
+        }
+    }
+
+    if vertex_count < 3 {
+        return false;
+    }
+
+    match earcut(&coords_flat, &hole_indices, 2) {
+        Ok(indices) => {
+            out_triangles.reserve(indices.len() * 2);
+            for index in indices {
+                let base = index * 2;
+                if base + 1 < coords_flat.len() {
+                    out_triangles.push(coords_flat[base] as f32);
+                    out_triangles.push(coords_flat[base + 1] as f32);
+                }
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn append_tessellated_polygon_rings(
+    rings: &[Vec<[f32; 2]>],
+    out_triangles: &mut Vec<f32>,
+) {
+    if try_append_tessellated_polygon_rings(rings, out_triangles) {
+        return;
+    }
+
+    // Fallback for pathological inputs: preserve previous behavior on each ring.
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        let first = ring[0];
+        for index in 1..(ring.len().saturating_sub(1)) {
+            let b = ring[index];
+            let c = ring[index + 1];
+            out_triangles.extend_from_slice(&[first[0], first[1], b[0], b[1], c[0], c[1]]);
+        }
+    }
+}
+
 fn decode_mvt_tile_scene(bytes: &[u8]) -> Result<VectorTileScene, String> {
     let mut scene = VectorTileScene::default();
     let mut tile = ProtoReader::new(bytes);
@@ -2051,11 +2359,15 @@ fn decode_mvt_tile_scene(bytes: &[u8]) -> Result<VectorTileScene, String> {
                 };
 
                 if is_water_fill_layer && geom_type == MvtGeomType::Polygon {
+                    let mut normalized_rings: Vec<Vec<[f32; 2]>> = Vec::new();
                     for path in paths {
                         if path.len() >= 3 {
-                            scene.water_polygons.push(normalize_mvt_path(&path, extent));
+                            normalized_rings.push(normalize_mvt_path(&path, extent));
                         }
                     }
+                    scene
+                        .water_polygons
+                        .extend(group_polygon_feature_rings(normalized_rings));
                     continue;
                 }
 
@@ -2114,11 +2426,21 @@ struct VectorLevelDrawParams {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct ScreenRectCss {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct VectorGlTileDrawCommand {
     key: TileKey,
     screen_x: f64,
     screen_y: f64,
     tile_display_size: f64,
+    clip_rect: Option<ScreenRectCss>,
+    prefer_coarse_water: bool,
 }
 
 struct VectorEngineState {
@@ -2437,7 +2759,7 @@ impl VectorEngineState {
 
     fn insert_tile_scene(&mut self, key: TileKey, scene: VectorTileScene) {
         self.cache_tick = self.cache_tick.saturating_add(1);
-        let prepared_geometry = build_prepared_vector_tile_geometry(&scene);
+        let prepared_geometry = build_prepared_vector_tile_geometry(&scene, key.z <= 8);
         self.tile_cache.insert(
             key,
             CachedVectorTile {
@@ -2533,9 +2855,146 @@ impl VectorEngineState {
                     screen_x,
                     screen_y,
                     tile_display_size: params.tile_display_size,
+                    clip_rect: None,
+                    prefer_coarse_water: false,
                 });
             }
         }
+    }
+
+    fn zoom_motion_active(&self) -> bool {
+        self.view_animation.is_some() || (self.zoom - self.zoom.round()).abs() > 0.03
+    }
+
+    fn should_use_coarse_water_mesh(&self, cmd: &VectorGlTileDrawCommand) -> bool {
+        let threshold = if cmd.prefer_coarse_water {
+            VECTOR_COARSE_WATER_TILE_SIZE_FALLBACK_CSS_PX
+        } else if self.zoom_motion_active() {
+            VECTOR_COARSE_WATER_TILE_SIZE_ACTIVE_ZOOM_CSS_PX
+        } else {
+            VECTOR_COARSE_WATER_TILE_SIZE_CSS_PX
+        };
+        cmd.tile_display_size <= threshold
+    }
+
+    fn intersect_screen_rect(a: ScreenRectCss, b: ScreenRectCss) -> Option<ScreenRectCss> {
+        let x0 = a.x.max(b.x);
+        let y0 = a.y.max(b.y);
+        let x1 = (a.x + a.w).min(b.x + b.w);
+        let y1 = (a.y + a.h).min(b.y + b.h);
+        let w = x1 - x0;
+        let h = y1 - y0;
+        (w > 0.0 && h > 0.0).then_some(ScreenRectCss { x: x0, y: y0, w, h })
+    }
+
+    fn fallback_parent_quadrant_rect(
+        cmd: &VectorGlTileDrawCommand,
+        child_qx: u32,
+        child_qy: u32,
+    ) -> ScreenRectCss {
+        let half = cmd.tile_display_size * 0.5;
+        ScreenRectCss {
+            x: cmd.screen_x + f64::from(child_qx) * half,
+            y: cmd.screen_y + f64::from(child_qy) * half,
+            w: half,
+            h: half,
+        }
+    }
+
+    fn collect_coverage_aware_fallback_gl_draw_commands(
+        &self,
+        fallback_zoom: u8,
+        target_zoom: u8,
+        target_visible_keys: &HashSet<TileKey>,
+        target_cached_keys: &HashSet<TileKey>,
+        out: &mut Vec<VectorGlTileDrawCommand>,
+    ) {
+        let mut base_commands = Vec::new();
+        self.collect_cached_level_gl_draw_commands(fallback_zoom, 1, &mut base_commands);
+        if base_commands.is_empty() {
+            return;
+        }
+
+        let viewport_rect = ScreenRectCss {
+            x: 0.0,
+            y: 0.0,
+            w: self.width.max(0.0),
+            h: self.height.max(0.0),
+        };
+
+        if fallback_zoom + 1 == target_zoom {
+            for base in base_commands {
+                for qy in 0..2u32 {
+                    for qx in 0..2u32 {
+                        let child_key = TileKey {
+                            z: target_zoom,
+                            x: base.key.x.saturating_mul(2).saturating_add(qx),
+                            y: base.key.y.saturating_mul(2).saturating_add(qy),
+                        };
+                        if !target_visible_keys.contains(&child_key)
+                            || target_cached_keys.contains(&child_key)
+                        {
+                            continue;
+                        }
+
+                        let quadrant_rect = Self::fallback_parent_quadrant_rect(&base, qx, qy);
+                        if let Some(clip_rect) = Self::intersect_screen_rect(quadrant_rect, viewport_rect) {
+                            out.push(VectorGlTileDrawCommand {
+                                clip_rect: Some(clip_rect),
+                                prefer_coarse_water: true,
+                                ..base
+                            });
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if target_zoom + 1 == fallback_zoom {
+            for mut base in base_commands {
+                let parent_key = TileKey {
+                    z: target_zoom,
+                    x: base.key.x / 2,
+                    y: base.key.y / 2,
+                };
+                if target_cached_keys.contains(&parent_key) {
+                    continue;
+                }
+                base.prefer_coarse_water = true;
+                out.push(base);
+            }
+            return;
+        }
+
+        for mut base in base_commands {
+            base.prefer_coarse_water = true;
+            out.push(base);
+        }
+    }
+
+    fn set_scissor_from_screen_rect(&self, gl: &WebGl2RenderingContext, rect: ScreenRectCss) -> bool {
+        let viewport_w = (self.width * self.dpr).round().max(1.0) as i32;
+        let viewport_h = (self.height * self.dpr).round().max(1.0) as i32;
+        let x0 = (rect.x * self.dpr).floor() as i32;
+        let y0_top = (rect.y * self.dpr).floor() as i32;
+        let x1 = ((rect.x + rect.w) * self.dpr).ceil() as i32;
+        let y1_top = ((rect.y + rect.h) * self.dpr).ceil() as i32;
+        let mut x = x0.clamp(0, viewport_w);
+        let mut x_end = x1.clamp(0, viewport_w);
+        let top = y0_top.clamp(0, viewport_h);
+        let bottom = y1_top.clamp(0, viewport_h);
+        if x_end < x {
+            std::mem::swap(&mut x, &mut x_end);
+        }
+        let w = x_end - x;
+        let h = bottom - top;
+        if w <= 0 || h <= 0 {
+            return false;
+        }
+        let y = viewport_h - bottom;
+        gl.scissor(x, y, w, h);
+        true
     }
 
     fn draw_cached_tile_webgl_layers(
@@ -2552,42 +3011,69 @@ impl VectorEngineState {
             return;
         };
 
-        if draw_water {
-            if let (Some(buffer), count) = (buffers.water_buffer.as_ref(), buffers.water_vertex_count) {
-            painter.draw_tile_buffer(
-                gl,
-                WebGl2RenderingContext::TRIANGLES,
-                buffer,
-                count,
-                [0.70, 0.86, 0.95, 1.0],
-                cmd.screen_x,
-                cmd.screen_y,
-                cmd.tile_display_size,
-                viewport_pixel_width,
-                viewport_pixel_height,
-                self.dpr,
-            );
+        let mut clipped = false;
+        if let Some(clip_rect) = cmd.clip_rect {
+            gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+            if !self.set_scissor_from_screen_rect(gl, clip_rect) {
+                gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+                return;
+            }
+            clipped = true;
         }
+
+        if draw_water {
+            let use_coarse = self.should_use_coarse_water_mesh(&cmd);
+            let (water_buffer, water_count) = if use_coarse {
+                if let (Some(buffer), count) =
+                    (buffers.water_coarse_buffer.as_ref(), buffers.water_coarse_vertex_count)
+                {
+                    (Some(buffer), count)
+                } else {
+                    (buffers.water_buffer.as_ref(), buffers.water_vertex_count)
+                }
+            } else {
+                (buffers.water_buffer.as_ref(), buffers.water_vertex_count)
+            };
+
+            if let (Some(buffer), count) = (water_buffer, water_count) {
+                painter.draw_tile_buffer(
+                    gl,
+                    WebGl2RenderingContext::TRIANGLES,
+                    buffer,
+                    count,
+                    [0.70, 0.86, 0.95, 1.0],
+                    cmd.screen_x,
+                    cmd.screen_y,
+                    cmd.tile_display_size,
+                    viewport_pixel_width,
+                    viewport_pixel_height,
+                    self.dpr,
+                );
+            }
         }
 
         if draw_lines {
             if let (Some(buffer), count) =
                 (buffers.transportation_buffer.as_ref(), buffers.transportation_vertex_count)
             {
-            painter.draw_tile_buffer(
-                gl,
-                WebGl2RenderingContext::LINES,
-                buffer,
-                count,
-                [0.867, 0.839, 0.788, 1.0],
-                cmd.screen_x,
-                cmd.screen_y,
-                cmd.tile_display_size,
-                viewport_pixel_width,
-                viewport_pixel_height,
-                self.dpr,
-            );
+                painter.draw_tile_buffer(
+                    gl,
+                    WebGl2RenderingContext::LINES,
+                    buffer,
+                    count,
+                    [0.867, 0.839, 0.788, 1.0],
+                    cmd.screen_x,
+                    cmd.screen_y,
+                    cmd.tile_display_size,
+                    viewport_pixel_width,
+                    viewport_pixel_height,
+                    self.dpr,
+                );
+            }
         }
+
+        if clipped {
+            gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
         }
     }
 
@@ -2648,24 +3134,35 @@ impl VectorEngineState {
         tile_display_size: f64,
         display_scale: f64,
     ) {
-        for ring in &scene.water_polygons {
-            if ring.len() < 3 {
+        for polygon in &scene.water_polygons {
+            if polygon.rings.is_empty() {
                 continue;
             }
             ctx.set_fill_style_str("#b3dbf2");
             ctx.begin_path();
-            let first = ring[0];
-            ctx.move_to(
-                tile_screen_x + f64::from(first[0]) * tile_display_size,
-                tile_screen_y + f64::from(first[1]) * tile_display_size,
-            );
-            for point in ring.iter().skip(1) {
-                ctx.line_to(
-                    tile_screen_x + f64::from(point[0]) * tile_display_size,
-                    tile_screen_y + f64::from(point[1]) * tile_display_size,
+            let mut drew_any_ring = false;
+
+            for ring in &polygon.rings {
+                if ring.len() < 3 {
+                    continue;
+                }
+                let first = ring[0];
+                ctx.move_to(
+                    tile_screen_x + f64::from(first[0]) * tile_display_size,
+                    tile_screen_y + f64::from(first[1]) * tile_display_size,
                 );
+                for point in ring.iter().skip(1) {
+                    ctx.line_to(
+                        tile_screen_x + f64::from(point[0]) * tile_display_size,
+                        tile_screen_y + f64::from(point[1]) * tile_display_size,
+                    );
+                }
+                drew_any_ring = true;
             }
-            ctx.fill();
+
+            if drew_any_ring {
+                ctx.fill();
+            }
         }
 
         if !scene.transportation_lines.is_empty() {
@@ -3117,9 +3614,9 @@ impl VectorEngineState {
         let pixel_height_f = f64::from(pixel_height.max(1));
         let mut fallback_draw_commands: Vec<VectorGlTileDrawCommand> = Vec::new();
         let mut target_draw_commands: Vec<VectorGlTileDrawCommand> = Vec::new();
-        if let Some(fallback_zoom) = self.fallback_zoom_for_frame(fetch_zoom) {
-            self.collect_cached_level_gl_draw_commands(fallback_zoom, 1, &mut fallback_draw_commands);
-        }
+        let mut target_visible_keys: HashSet<TileKey> = HashSet::new();
+        let mut target_cached_keys: HashSet<TileKey> = HashSet::new();
+        let fallback_zoom = self.fallback_zoom_for_frame(fetch_zoom);
 
         gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
 
@@ -3149,17 +3646,21 @@ impl VectorEngineState {
                 }
 
                 let mut placeholder_fill_color: Option<(f32, f32, f32)> = None;
+                target_visible_keys.insert(key);
                 let x_px = (screen_x * self.dpr).round() as i32;
                 let y_px = ((self.height - (screen_y + tile_display_size)) * self.dpr).round() as i32;
                 let w_px = ((tile_display_size * self.dpr).round() as i32).max(1);
                 let h_px = ((tile_display_size * self.dpr).round() as i32).max(1);
 
                 if self.tile_cache.contains_key(&key) {
+                    target_cached_keys.insert(key);
                     target_draw_commands.push(VectorGlTileDrawCommand {
                         key,
                         screen_x,
                         screen_y,
                         tile_display_size,
+                        clip_rect: None,
+                        prefer_coarse_water: false,
                     });
                 } else if self.pending_tiles.contains(&key) {
                     placeholder_fill_color = Some((0.952, 0.950, 0.942));
@@ -3171,6 +3672,16 @@ impl VectorEngineState {
                     gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
                 }
             }
+        }
+
+        if let Some(fallback_zoom) = fallback_zoom {
+            self.collect_coverage_aware_fallback_gl_draw_commands(
+                fallback_zoom,
+                fetch_zoom,
+                &target_visible_keys,
+                &target_cached_keys,
+                &mut fallback_draw_commands,
+            );
         }
 
         gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
