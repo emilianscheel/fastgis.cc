@@ -14,14 +14,33 @@ import { MapToolbar, type MapStyleOption } from "@/components/map/map-toolbar";
 import { Kbd } from "@/components/ui/kbd";
 import { SonnerGroupedPills } from "@/components/ui/sonner";
 import { useBoxZoomTool } from "@/hooks/use-box-zoom-tool";
-import { useMapEngineRuntime } from "@/hooks/use-map-engine-runtime";
+import { useMapEngineRuntime, type BasemapStyleConfig } from "@/hooks/use-map-engine-runtime";
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
 import { appToast } from "@/lib/app-toast";
 import { dispatchScannedImport, scanImportFile } from "@/lib/import";
-import type { InitConfig, PlacedMarker, ProjectedPoint } from "@/lib/map-protocol";
+import type { PlacedMarker, ProjectedPoint } from "@/lib/map-protocol";
 
-type MapStyle = MapStyleOption & {
+type RasterMapStyle = MapStyleOption & {
+  engineKind: "raster";
   tileUrlTemplate: string;
+};
+
+type VectorMapStyle = MapStyleOption & {
+  engineKind: "vector";
+  vectorSource: {
+    tileJsonUrl: string;
+    stylePreset: "osm-vector-minimal";
+    backendPreference: "webgl2" | "webgpu";
+  };
+};
+
+type MapStyle = RasterMapStyle | VectorMapStyle;
+
+type BaseMapConfig = {
+  minZoom: number;
+  maxZoom: number;
+  tileSize: number;
+  cacheSize: number;
 };
 
 type MeasurementRenderPoint = {
@@ -47,21 +66,38 @@ const MAP_STYLES: MapStyle[] = [
   {
     id: "osm-fr-hot",
     label: "OpenStreetMap France HOT",
+    engineKind: "raster",
+    typeHintLabel: "Raster",
     tileUrlTemplate: "https://a.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
   },
   {
     id: "carto-light",
     label: "Carto Light",
+    engineKind: "raster",
+    typeHintLabel: "Raster",
     tileUrlTemplate: "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
   },
   {
     id: "carto-dark",
     label: "Carto Dark",
+    engineKind: "raster",
+    typeHintLabel: "Raster",
     tileUrlTemplate: "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+  },
+  {
+    id: "osm-vector-minimal",
+    label: "OSM Vector Minimal",
+    engineKind: "vector",
+    typeHintLabel: "Vector",
+    vectorSource: {
+      tileJsonUrl: "https://vector.openstreetmap.org/shortbread_v1/tilejson.json",
+      stylePreset: "osm-vector-minimal",
+      backendPreference: "webgpu"
+    }
   }
 ];
 
-const BASE_MAP_CONFIG: Omit<InitConfig, "tileUrlTemplate"> = {
+const BASE_MAP_CONFIG: BaseMapConfig = {
   minZoom: 0,
   maxZoom: 19,
   tileSize: 256,
@@ -198,12 +234,32 @@ function getMapStyleById(id: MapStyle["id"]): MapStyle {
   return MAP_STYLES.find((style) => style.id === id) ?? MAP_STYLES[0];
 }
 
+function toBasemapStyleConfig(style: MapStyle): BasemapStyleConfig {
+  if (style.engineKind === "raster") {
+    return {
+      id: style.id,
+      engineKind: "raster",
+      tileUrlTemplate: style.tileUrlTemplate
+    };
+  }
+
+  return {
+    id: style.id,
+    engineKind: "vector",
+    vectorSource: style.vectorSource
+  };
+}
+
 export function MapShell() {
   const { resolvedTheme } = useTheme();
 
   const [isMounted, setIsMounted] = useState(false);
   const [mapStyleId, setMapStyleId] = useState<MapStyle["id"]>(LIGHT_THEME_MAP_STYLE_ID);
   const selectedMapStyle = useMemo(() => getMapStyleById(mapStyleId), [mapStyleId]);
+  const selectedBasemapStyle = useMemo(
+    () => toBasemapStyleConfig(selectedMapStyle),
+    [selectedMapStyle]
+  );
 
   useEffect(() => {
     setIsMounted(true);
@@ -245,11 +301,14 @@ export function MapShell() {
     clearMarkerHover,
     loadTrajectoryCsv,
     loadMarkerCsv,
-    setTileUrlTemplate
+    getViewState,
+    activeEngineKind
   } = useMapEngineRuntime({
-    initialTileUrlTemplate: selectedMapStyle.tileUrlTemplate,
+    basemapStyle: selectedBasemapStyle,
     baseMapConfig: BASE_MAP_CONFIG
   });
+  const isVectorStyleSelected = selectedMapStyle.engineKind === "vector";
+  const isVectorEngineActive = activeEngineKind === "vector";
 
   const zoomAnimationRef = useRef<number | null>(null);
 
@@ -543,6 +602,26 @@ export function MapShell() {
   });
 
   useEffect(() => {
+    if (!(isVectorEngineActive || isVectorStyleSelected)) {
+      return;
+    }
+
+    if (isMarkerActive) {
+      toggleMarkerTool();
+    }
+    if (isMeasurementActive) {
+      toggleMeasurementTool();
+    }
+  }, [
+    isMarkerActive,
+    isMeasurementActive,
+    isVectorEngineActive,
+    isVectorStyleSelected,
+    toggleMarkerTool,
+    toggleMeasurementTool
+  ]);
+
+  useEffect(() => {
     const wasMeasurementActive = wasMeasurementActiveRef.current;
     isMeasurementActiveRef.current = isMeasurementActive;
 
@@ -822,12 +901,13 @@ export function MapShell() {
     onZoomOut: handleZoomOut
   });
 
-  useEffect(() => {
-    setTileUrlTemplate(selectedMapStyle.tileUrlTemplate);
-  }, [selectedMapStyle, setTileUrlTemplate]);
-
   const handleImportBytes = useCallback(
     (file: File, bytes: Uint8Array) => {
+      if (isVectorEngineActive || isVectorStyleSelected) {
+        appToast.error("CSV import is not available for the vector style yet.");
+        return;
+      }
+
       const scanResult = scanImportFile({
         fileName: file.name,
         mimeType: file.type,
@@ -848,7 +928,7 @@ export function MapShell() {
         appToast.error(`No import handler available for: ${file.name}`);
       }
     },
-    [loadMarkerCsv, loadTrajectoryCsv]
+    [isVectorEngineActive, isVectorStyleSelected, loadMarkerCsv, loadTrajectoryCsv]
   );
 
   const handleFile = useCallback(
@@ -871,11 +951,47 @@ export function MapShell() {
     [canInteract, handleFile]
   );
 
-  const handleMapStyleChange = useCallback((value: string) => {
-    const nextStyle = MAP_STYLES.find((style) => style.id === value);
-    if (!nextStyle) return;
-    setMapStyleId(nextStyle.id);
+  const showVectorToolUnavailable = useCallback((toolName: string) => {
+    appToast.error(`${toolName} is not available in the vector style MVP yet.`);
   }, []);
+
+  const handleToggleMarkerTool = useCallback(() => {
+    if (isVectorEngineActive || isVectorStyleSelected) {
+      showVectorToolUnavailable("Marker tool");
+      return;
+    }
+    toggleMarkerTool();
+  }, [isVectorEngineActive, isVectorStyleSelected, showVectorToolUnavailable, toggleMarkerTool]);
+
+  const handleToggleMeasurementTool = useCallback(() => {
+    if (isVectorEngineActive || isVectorStyleSelected) {
+      showVectorToolUnavailable("Measurement tool");
+      return;
+    }
+    toggleMeasurementTool();
+  }, [
+    isVectorEngineActive,
+    isVectorStyleSelected,
+    showVectorToolUnavailable,
+    toggleMeasurementTool
+  ]);
+
+  const handleMapStyleChange = useCallback(
+    (value: string) => {
+      const nextStyle = MAP_STYLES.find((style) => style.id === value);
+      if (!nextStyle) return;
+
+      void (async () => {
+        try {
+          await getViewState();
+        } catch (error) {
+          console.error("Failed to capture current map view before style switch.", error);
+        }
+        setMapStyleId(nextStyle.id);
+      })();
+    },
+    [getViewState]
+  );
 
   return (
     <main className="fixed inset-0 h-screen w-screen overflow-hidden bg-background">
@@ -901,7 +1017,7 @@ export function MapShell() {
         onRemoveMeasurementMarker={handleRemoveMeasurementMarker}
         onMeasurementDistanceCopy={handleMeasurementDistanceCopy}
       />
-      <CsvDropOverlay enabled={canInteract} onDropFiles={handleDroppedFiles} />
+      <CsvDropOverlay enabled={canInteract && !isVectorEngineActive && !isVectorStyleSelected} onDropFiles={handleDroppedFiles} />
       <MapToolbar
         canInteract={canInteract}
         isMounted={isMounted}
@@ -916,8 +1032,8 @@ export function MapShell() {
         onToggleBoxZoom={toggleBoxZoomTool}
         onToggleZoomInTool={toggleZoomInTool}
         onToggleZoomOutTool={toggleZoomOutTool}
-        onToggleMarker={toggleMarkerTool}
-        onToggleMeasurement={toggleMeasurementTool}
+        onToggleMarker={handleToggleMarkerTool}
+        onToggleMeasurement={handleToggleMeasurementTool}
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
       />

@@ -49,3 +49,15 @@ export function sampleTileEdgeColors(bitmap) {
   const bottom = sampleRow(Math.max(0, bitmap.height - 1));
   return [top[0], top[1], top[2], bottom[0], bottom[1], bottom[2]];
 }
+
+export async function fetchTileBytes(url) {
+  const response = await fetch(url, { mode: "cors", credentials: "omit" });
+  if (!response.ok) {
+    throw new Error(`Tile request failed with status ${response.status}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+export function webgpuSupported() {
+  return typeof navigator !== "undefined" && !!navigator.gpu;
+}

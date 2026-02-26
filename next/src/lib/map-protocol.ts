@@ -1,9 +1,41 @@
-export type InitConfig = {
-  tileUrlTemplate: string;
+export type EngineKind = "raster" | "vector";
+
+export type VectorBackendPreference = "webgl2" | "webgpu";
+export type VectorBackendActual = "webgl2" | "webgpu" | "webgpu-fallback-webgl2" | "canvas2d";
+
+type CommonInitConfig = {
   minZoom: number;
   maxZoom: number;
   tileSize: number;
   cacheSize: number;
+};
+
+export type RasterInitConfig = CommonInitConfig & {
+  engineKind: "raster";
+  tileUrlTemplate: string;
+};
+
+export type VectorSourceConfig = {
+  tileJsonUrl: string;
+  tileUrlTemplate: string;
+  attribution?: string | null;
+  sourceMaxZoom?: number | null;
+  backendPreference: VectorBackendPreference;
+  stylePreset: "osm-vector-minimal";
+  layerNames?: string[] | null;
+};
+
+export type VectorInitConfig = CommonInitConfig & {
+  engineKind: "vector";
+  vectorSource: VectorSourceConfig;
+};
+
+export type InitConfig = RasterInitConfig | VectorInitConfig;
+
+export type ViewState = {
+  lon: number;
+  lat: number;
+  zoom: number;
 };
 
 export type CsvBounds = {
@@ -77,10 +109,12 @@ export type WorkerInMessage =
     }
   | {
       type: "SET_VIEW";
+      payload: ViewState;
+    }
+  | {
+      type: "GET_VIEW";
       payload: {
-        lon: number;
-        lat: number;
-        zoom: number;
+        requestId: number;
       };
     }
   | {
@@ -179,6 +213,15 @@ export type WorkerOutMessage =
       type: "READY";
       payload: {
         mode: "worker";
+        engineKind: EngineKind;
+        backend: VectorBackendActual | "canvas2d";
+      };
+    }
+  | {
+      type: "VIEW_STATE";
+      payload: {
+        requestId: number;
+        view: ViewState | null;
       };
     }
   | {

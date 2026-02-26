@@ -3,13 +3,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
+  EngineKind,
   InitConfig,
   MarkerHover,
   PlacedMarker,
   ProjectedPoint,
+  RasterInitConfig,
+  VectorBackendActual,
+  VectorBackendPreference,
+  VectorInitConfig,
+  VectorSourceConfig,
+  ViewState,
   WorkerInMessage,
   WorkerOutMessage
 } from "@/lib/map-protocol";
+import { resolveVectorTileJson } from "@/lib/vector-tilejson";
 
 type MainThreadEngine = {
   resize(width: number, height: number, dpr: number): void;
@@ -25,6 +33,7 @@ type MainThreadEngine = {
   remove_marker_lon_lat(lon: number, lat: number): void;
   hit_test_marker(x: number, y: number): MarkerHover | null;
   project_lon_lat(lon: number, lat: number): ProjectedPoint | null;
+  get_view(): ViewState | null;
   remove_recent_markers(count: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): unknown;
@@ -38,13 +47,44 @@ type RuntimeMode = "none" | "worker" | "main";
 export type RuntimeStatus = "loading" | "ready" | "error";
 type PointerMessageType = "POINTER_DOWN" | "POINTER_MOVE" | "POINTER_UP";
 
+type BaseMapConfig = {
+  minZoom: number;
+  maxZoom: number;
+  tileSize: number;
+  cacheSize: number;
+};
+
+export type RasterBasemapStyleConfig = {
+  id: string;
+  engineKind: "raster";
+  tileUrlTemplate: string;
+};
+
+export type VectorBasemapStyleConfig = {
+  id: string;
+  engineKind: "vector";
+  vectorSource: {
+    tileJsonUrl: string;
+    stylePreset: "osm-vector-minimal";
+    backendPreference: VectorBackendPreference;
+  };
+};
+
+export type BasemapStyleConfig = RasterBasemapStyleConfig | VectorBasemapStyleConfig;
+
+type ReadyDiagnostics = {
+  engineKind: EngineKind;
+  backend: VectorBackendActual | "canvas2d";
+  mode: RuntimeMode | "none";
+};
+
 type UseMapEngineRuntimeOptions = {
-  initialTileUrlTemplate: string;
-  baseMapConfig: Omit<InitConfig, "tileUrlTemplate">;
+  basemapStyle: BasemapStyleConfig;
+  baseMapConfig: BaseMapConfig;
 };
 
 export function useMapEngineRuntime({
-  initialTileUrlTemplate,
+  basemapStyle,
   baseMapConfig
 }: UseMapEngineRuntimeOptions) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -55,8 +95,17 @@ export function useMapEngineRuntime({
   const runtimeModeRef = useRef<RuntimeMode>("none");
   const rafRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const tileUrlTemplateRef = useRef(initialTileUrlTemplate);
-  const activeTileTemplateRef = useRef(initialTileUrlTemplate);
+  const desiredStyleRef = useRef<BasemapStyleConfig>(basemapStyle);
+  const activeStyleRef = useRef<BasemapStyleConfig | null>(null);
+  const desiredInitConfigRef = useRef<InitConfig>({
+    ...baseMapConfig,
+    engineKind: "raster",
+    tileUrlTemplate:
+      basemapStyle.engineKind === "raster"
+        ? basemapStyle.tileUrlTemplate
+        : "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+  });
+  const activeInitConfigRef = useRef<InitConfig | null>(null);
   const markerHoverRequestIdRef = useRef(0);
   const markerPlacementRequestIdRef = useRef(0);
   const pendingMarkerPlacementsRef = useRef<Map<number, (marker: PlacedMarker | null) => void>>(
@@ -66,6 +115,14 @@ export function useMapEngineRuntime({
   const pendingProjectionRequestsRef = useRef<Map<number, (point: ProjectedPoint | null) => void>>(
     new Map()
   );
+  const viewRequestIdRef = useRef(0);
+  const pendingViewRequestsRef = useRef<Map<number, (view: ViewState | null) => void>>(new Map());
+  const lastKnownViewRef = useRef<ViewState>({ lon: 0, lat: 20, zoom: 2 });
+  const readyDiagnosticsRef = useRef<ReadyDiagnostics>({
+    engineKind: desiredInitConfigRef.current.engineKind,
+    backend: "canvas2d",
+    mode: "none"
+  });
 
   const [status, setStatus] = useState<RuntimeStatus>("loading");
   const [canvasInstance, setCanvasInstance] = useState(0);
@@ -89,6 +146,80 @@ export function useMapEngineRuntime({
     if (!workerRef.current) return;
     workerRef.current.postMessage(message, transfer ?? []);
   }, []);
+
+  const buildInitConfigForStyle = useCallback(
+    async (style: BasemapStyleConfig): Promise<InitConfig> => {
+      if (style.engineKind === "raster") {
+        const rasterConfig: RasterInitConfig = {
+          ...baseMapConfig,
+          engineKind: "raster",
+          tileUrlTemplate: style.tileUrlTemplate
+        };
+        return rasterConfig;
+      }
+
+      const tileJson = await resolveVectorTileJson(style.vectorSource.tileJsonUrl);
+      const vectorSource: VectorSourceConfig = {
+        tileJsonUrl: style.vectorSource.tileJsonUrl,
+        tileUrlTemplate: tileJson.tileUrlTemplate,
+        attribution: tileJson.attribution,
+        sourceMaxZoom: tileJson.maxZoom,
+        backendPreference: style.vectorSource.backendPreference,
+        stylePreset: style.vectorSource.stylePreset,
+        layerNames: tileJson.layerNames
+      };
+      const vectorConfig: VectorInitConfig = {
+        ...baseMapConfig,
+        engineKind: "vector",
+        minZoom: Math.max(baseMapConfig.minZoom, tileJson.minZoom),
+        maxZoom: Math.min(baseMapConfig.maxZoom, tileJson.maxZoom),
+        vectorSource
+      };
+      return vectorConfig;
+    },
+    [baseMapConfig]
+  );
+
+  const requestWorkerViewState = useCallback((): Promise<ViewState | null> => {
+    if (runtimeModeRef.current !== "worker" || !workerRef.current || !workerReadyRef.current) {
+      return Promise.resolve(null);
+    }
+
+    const requestId = viewRequestIdRef.current + 1;
+    viewRequestIdRef.current = requestId;
+
+    return new Promise<ViewState | null>((resolve) => {
+      pendingViewRequestsRef.current.set(requestId, resolve);
+      sendToWorker({
+        type: "GET_VIEW",
+        payload: { requestId }
+      });
+    });
+  }, [sendToWorker]);
+
+  const getCurrentViewState = useCallback(async (): Promise<ViewState | null> => {
+    if (runtimeModeRef.current === "worker") {
+      const view = await requestWorkerViewState();
+      if (view) {
+        lastKnownViewRef.current = view;
+      }
+      return view;
+    }
+
+    if (runtimeModeRef.current === "main") {
+      try {
+        const view = mainEngineRef.current?.get_view() ?? null;
+        if (view) {
+          lastKnownViewRef.current = view;
+        }
+        return view;
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    return lastKnownViewRef.current ?? null;
+  }, [requestWorkerViewState]);
 
   const sendPointerEvent = useCallback(
     (type: PointerMessageType, x: number, y: number, button?: number) => {
@@ -394,6 +525,10 @@ export function useMapEngineRuntime({
       resolve(null);
     }
     pendingProjectionRequestsRef.current.clear();
+    for (const resolve of pendingViewRequestsRef.current.values()) {
+      resolve(null);
+    }
+    pendingViewRequestsRef.current.clear();
   }, []);
 
   const resetCanvasElement = useCallback(async () => {
@@ -412,30 +547,42 @@ export function useMapEngineRuntime({
   }, []);
 
   const initMainThreadEngine = useCallback(
-    async (options?: { forceFreshCanvas?: boolean }) => {
+    async (options?: { forceFreshCanvas?: boolean; restoreView?: ViewState | null }) => {
       const canvas = options?.forceFreshCanvas ? await resetCanvasElement() : canvasRef.current;
       if (!canvas) {
         throw new Error("Map canvas is not mounted.");
       }
 
-      const initConfig: InitConfig = {
-        ...baseMapConfig,
-        tileUrlTemplate: tileUrlTemplateRef.current
+      const initConfig = desiredInitConfigRef.current;
+      const wasmModule = (await import("@/wasm/pkg/map_engine_wasm.js")) as unknown as {
+        default: () => Promise<unknown>;
+        init_engine: (canvas: HTMLCanvasElement, config: InitConfig) => MainThreadEngine;
+        init_vector_engine?: (canvas: HTMLCanvasElement, config: InitConfig) => MainThreadEngine;
       };
-      const wasmModule = await import("@/wasm/pkg/map_engine_wasm.js");
       await wasmModule.default();
-      const engine = wasmModule.init_engine(canvas, initConfig) as MainThreadEngine;
+      const engine =
+        initConfig.engineKind === "vector" && typeof wasmModule.init_vector_engine === "function"
+          ? wasmModule.init_vector_engine(canvas, initConfig)
+          : wasmModule.init_engine(canvas, initConfig);
       const { width, height } = viewportSize();
       engine.resize(width, height, window.devicePixelRatio || 1);
-      engine.set_view(0, 20, 2);
+      const view = options?.restoreView ?? lastKnownViewRef.current;
+      engine.set_view(view?.lon ?? 0, view?.lat ?? 20, view?.zoom ?? 2);
 
       mainEngineRef.current?.destroy();
       mainEngineRef.current = engine;
+      activeInitConfigRef.current = initConfig;
+      activeStyleRef.current = desiredStyleRef.current;
+      readyDiagnosticsRef.current = {
+        engineKind: initConfig.engineKind,
+        backend: initConfig.engineKind === "vector" ? "webgl2" : "canvas2d",
+        mode: "main"
+      };
 
       runtimeModeRef.current = "main";
       setStatus("ready");
     },
-    [baseMapConfig, resetCanvasElement, viewportSize]
+    [resetCanvasElement, viewportSize]
   );
 
   const fallbackToMainThread = useCallback(
@@ -468,6 +615,13 @@ export function useMapEngineRuntime({
 
       if (message.type === "READY") {
         workerReadyRef.current = true;
+        activeInitConfigRef.current = desiredInitConfigRef.current;
+        activeStyleRef.current = desiredStyleRef.current;
+        readyDiagnosticsRef.current = {
+          engineKind: message.payload.engineKind,
+          backend: message.payload.backend,
+          mode: "worker"
+        };
         setStatus("ready");
         return;
       }
@@ -514,6 +668,20 @@ export function useMapEngineRuntime({
 
         pendingProjectionRequestsRef.current.delete(message.payload.requestId);
         resolve(message.payload.point);
+        return;
+      }
+
+      if (message.type === "VIEW_STATE") {
+        const resolve = pendingViewRequestsRef.current.get(message.payload.requestId);
+        if (!resolve) {
+          return;
+        }
+
+        pendingViewRequestsRef.current.delete(message.payload.requestId);
+        if (message.payload.view) {
+          lastKnownViewRef.current = message.payload.view;
+        }
+        resolve(message.payload.view);
       }
     },
     [fallbackToMainThread]
@@ -528,8 +696,22 @@ export function useMapEngineRuntime({
 
       setStatus("loading");
       workerReadyRef.current = false;
+      desiredStyleRef.current = basemapStyle;
+      desiredInitConfigRef.current = await buildInitConfigForStyle(basemapStyle);
+      readyDiagnosticsRef.current = {
+        engineKind: desiredInitConfigRef.current.engineKind,
+        backend: desiredInitConfigRef.current.engineKind === "vector" ? "webgl2" : "canvas2d",
+        mode: "none"
+      };
+      // Turbopack dev can serve a stale/incompatible worker-side wasm glue module when the wasm
+      // import surface changes (e.g. after adding WebGL bindings for the vector engine), which
+      // causes instantiate-time import errors. Keep dev on main-thread runtime; production can
+      // still use the worker path for raster.
+      const preferWorkerForStyle =
+        process.env.NODE_ENV === "production" && desiredInitConfigRef.current.engineKind === "raster";
 
       const offscreenCapable =
+        preferWorkerForStyle &&
         typeof Worker !== "undefined" &&
         typeof (canvas as HTMLCanvasElement & { transferControlToOffscreen?: () => OffscreenCanvas })
           .transferControlToOffscreen === "function";
@@ -558,13 +740,14 @@ export function useMapEngineRuntime({
               height,
               dpr: window.devicePixelRatio || 1,
               origin: window.location.origin,
-              config: {
-                ...baseMapConfig,
-                tileUrlTemplate: tileUrlTemplateRef.current
-              }
+              config: desiredInitConfigRef.current
             }
           };
           worker.postMessage(message, [offscreen]);
+          worker.postMessage({
+            type: "SET_VIEW",
+            payload: lastKnownViewRef.current
+          } satisfies WorkerInMessage);
 
           runtimeModeRef.current = "worker";
         } catch {
@@ -613,11 +796,16 @@ export function useMapEngineRuntime({
         resolve(null);
       }
       pendingProjectionRequestsRef.current.clear();
+      for (const resolve of pendingViewRequestsRef.current.values()) {
+        resolve(null);
+      }
+      pendingViewRequestsRef.current.clear();
     };
   }, [
-    baseMapConfig,
+    buildInitConfigForStyle,
     fallbackToMainThread,
     handleWorkerMessage,
+    basemapStyle,
     initMainThreadEngine,
     resizeEngine,
     startFrameLoop,
@@ -647,6 +835,9 @@ export function useMapEngineRuntime({
   const loadTrajectoryCsv = useCallback(
     (fileName: string, bytes: Uint8Array) => {
       if (!canInteract) return;
+      if ((activeInitConfigRef.current ?? desiredInitConfigRef.current).engineKind === "vector") {
+        return;
+      }
 
       if (runtimeModeRef.current === "worker") {
         if (!workerReadyRef.current) return;
@@ -674,6 +865,9 @@ export function useMapEngineRuntime({
   const loadMarkerCsv = useCallback(
     (fileName: string, bytes: Uint8Array) => {
       if (!canInteract) return;
+      if ((activeInitConfigRef.current ?? desiredInitConfigRef.current).engineKind === "vector") {
+        return;
+      }
 
       if (runtimeModeRef.current === "worker") {
         if (!workerReadyRef.current) return;
@@ -700,10 +894,18 @@ export function useMapEngineRuntime({
 
   const setTileUrlTemplate = useCallback(
     (tileUrlTemplate: string) => {
-      tileUrlTemplateRef.current = tileUrlTemplate;
+      const desiredConfig = desiredInitConfigRef.current;
+      if (desiredConfig.engineKind !== "raster") {
+        return;
+      }
 
-      if (!canInteract) return;
-      if (tileUrlTemplate === activeTileTemplateRef.current) {
+      desiredInitConfigRef.current = { ...desiredConfig, tileUrlTemplate };
+
+      const activeConfig = activeInitConfigRef.current;
+      if (!canInteract || !activeConfig || activeConfig.engineKind !== "raster") {
+        return;
+      }
+      if (tileUrlTemplate === activeConfig.tileUrlTemplate) {
         return;
       }
 
@@ -712,15 +914,17 @@ export function useMapEngineRuntime({
           type: "SET_TILE_URL_TEMPLATE",
           payload: { tileUrlTemplate }
         });
-        activeTileTemplateRef.current = tileUrlTemplate;
+        activeInitConfigRef.current = { ...activeConfig, tileUrlTemplate };
         return;
       }
 
       mainEngineRef.current?.set_tile_url_template(tileUrlTemplate);
-      activeTileTemplateRef.current = tileUrlTemplate;
+      activeInitConfigRef.current = { ...activeConfig, tileUrlTemplate };
     },
     [canInteract, sendToWorker]
   );
+
+  const getViewState = useCallback(() => getCurrentViewState(), [getCurrentViewState]);
 
   return {
     canvasRef,
@@ -743,6 +947,9 @@ export function useMapEngineRuntime({
     clearMarkerHover,
     loadTrajectoryCsv,
     loadMarkerCsv,
-    setTileUrlTemplate
+    setTileUrlTemplate,
+    getViewState,
+    activeEngineKind: activeInitConfigRef.current?.engineKind ?? desiredInitConfigRef.current.engineKind,
+    readyDiagnostics: readyDiagnosticsRef.current
   };
 }

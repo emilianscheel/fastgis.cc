@@ -1,4 +1,4 @@
-use js_sys::Array;
+use js_sys::{Array, Float32Array, Uint8Array};
 use map_core::{
     clamp_lat, lon_lat_to_world, marker_bounds, normalize_lon, parse_marker_csv,
     parse_trajectory_csv, trajectory_bounds, world_to_lon_lat, Bounds, MarkerPoint,
@@ -14,7 +14,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{
     CanvasRenderingContext2d, HtmlCanvasElement, ImageBitmap, OffscreenCanvas,
-    OffscreenCanvasRenderingContext2d,
+    OffscreenCanvasRenderingContext2d, WebGl2RenderingContext, WebGlBuffer, WebGlProgram,
+    WebGlShader, WebGlUniformLocation,
 };
 
 static PANIC_HOOK: Once = Once::new();
@@ -88,6 +89,18 @@ export function sampleTileEdgeColors(bitmap) {
   const bottom = sampleRow(Math.max(0, bitmap.height - 1));
   return [top[0], top[1], top[2], bottom[0], bottom[1], bottom[2]];
 }
+
+export async function fetchTileBytes(url) {
+  const response = await fetch(url, { mode: "cors", credentials: "omit" });
+  if (!response.ok) {
+    throw new Error(`Tile request failed with status ${response.status}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+export function webgpuSupported() {
+  return typeof navigator !== "undefined" && !!navigator.gpu;
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(catch, js_name = fetchTileBitmap)]
@@ -95,26 +108,50 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_name = sampleTileEdgeColors)]
     fn sample_tile_edge_colors(bitmap: &ImageBitmap) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(catch, js_name = fetchTileBytes)]
+    async fn fetch_tile_bytes(url: String) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_name = webgpuSupported)]
+    fn webgpu_supported() -> bool;
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VectorSourceConfig {
+    tile_json_url: Option<String>,
+    tile_url_template: Option<String>,
+    attribution: Option<String>,
+    source_max_zoom: Option<u8>,
+    backend_preference: Option<String>,
+    style_preset: Option<String>,
+    layer_names: Option<Vec<String>>,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InitConfig {
+    engine_kind: Option<String>,
     tile_url_template: Option<String>,
     min_zoom: Option<u8>,
     max_zoom: Option<u8>,
     tile_size: Option<u32>,
     cache_size: Option<usize>,
+    vector_source: Option<VectorSourceConfig>,
 }
 
 impl Default for InitConfig {
     fn default() -> Self {
         Self {
+            engine_kind: Some("raster".to_string()),
             tile_url_template: Some("https://tile.openstreetmap.org/{z}/{x}/{y}.png".to_string()),
             min_zoom: Some(0),
             max_zoom: Some(19),
             tile_size: Some(256),
             cache_size: Some(1024),
+            vector_source: None,
         }
     }
 }
@@ -197,11 +234,20 @@ struct ProjectedPoint {
     screen_y: f64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewState {
+    lon: f64,
+    lat: f64,
+    zoom: f64,
+}
+
 enum CanvasSurface {
     Html(HtmlCanvasElement),
     Offscreen(OffscreenCanvas),
 }
 
+#[derive(Clone)]
 enum RenderContext {
     Html(CanvasRenderingContext2d),
     Offscreen(OffscreenCanvasRenderingContext2d),
@@ -1482,6 +1528,1385 @@ fn pump_requests(state: Rc<RefCell<EngineState>>) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VectorBackendKind {
+    WebGl2,
+    WebGpuFallbackWebGl2,
+    Canvas2d,
+}
+
+impl VectorBackendKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            VectorBackendKind::WebGl2 => "webgl2",
+            VectorBackendKind::WebGpuFallbackWebGl2 => "webgpu-fallback-webgl2",
+            VectorBackendKind::Canvas2d => "canvas2d",
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct VectorTileScene {
+    water_polygons: Vec<Vec<[f32; 2]>>,
+    transportation_lines: Vec<Vec<[f32; 2]>>,
+}
+
+#[derive(Clone)]
+struct SimpleGlPainter {
+    program: WebGlProgram,
+    vertex_buffer: WebGlBuffer,
+    position_attrib: u32,
+    color_uniform: WebGlUniformLocation,
+}
+
+impl SimpleGlPainter {
+    fn draw_arrays(
+        &self,
+        gl: &WebGl2RenderingContext,
+        mode: u32,
+        vertices_ndc: &[f32],
+        color: [f32; 4],
+    ) {
+        if vertices_ndc.is_empty() {
+            return;
+        }
+
+        gl.use_program(Some(&self.program));
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&self.vertex_buffer));
+        let buffer = Float32Array::from(vertices_ndc);
+        gl.buffer_data_with_array_buffer_view(
+            WebGl2RenderingContext::ARRAY_BUFFER,
+            &buffer,
+            WebGl2RenderingContext::DYNAMIC_DRAW,
+        );
+        gl.enable_vertex_attrib_array(self.position_attrib);
+        gl.vertex_attrib_pointer_with_i32(
+            self.position_attrib,
+            2,
+            WebGl2RenderingContext::FLOAT,
+            false,
+            0,
+            0,
+        );
+        gl.uniform4f(
+            Some(&self.color_uniform),
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+        );
+        gl.draw_arrays(mode, 0, (vertices_ndc.len() / 2) as i32);
+    }
+}
+
+fn compile_gl_shader(
+    gl: &WebGl2RenderingContext,
+    shader_type: u32,
+    source: &str,
+) -> Result<WebGlShader, JsValue> {
+    let shader = gl
+        .create_shader(shader_type)
+        .ok_or_else(|| JsValue::from_str("Failed to create WebGL shader"))?;
+    gl.shader_source(&shader, source);
+    gl.compile_shader(&shader);
+
+    let status = gl
+        .get_shader_parameter(&shader, WebGl2RenderingContext::COMPILE_STATUS)
+        .as_bool()
+        .unwrap_or(false);
+    if status {
+        return Ok(shader);
+    }
+
+    let log = gl
+        .get_shader_info_log(&shader)
+        .unwrap_or_else(|| "Unknown shader compile error".to_string());
+    Err(JsValue::from_str(&format!("WebGL shader compile failed: {log}")))
+}
+
+fn create_simple_gl_painter(gl: &WebGl2RenderingContext) -> Result<SimpleGlPainter, JsValue> {
+    let vertex_shader = compile_gl_shader(
+        gl,
+        WebGl2RenderingContext::VERTEX_SHADER,
+        r#"#version 300 es
+in vec2 a_pos;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}"#,
+    )?;
+    let fragment_shader = compile_gl_shader(
+        gl,
+        WebGl2RenderingContext::FRAGMENT_SHADER,
+        r#"#version 300 es
+precision mediump float;
+uniform vec4 u_color;
+out vec4 outColor;
+void main() {
+  outColor = u_color;
+}"#,
+    )?;
+
+    let program = gl
+        .create_program()
+        .ok_or_else(|| JsValue::from_str("Failed to create WebGL program"))?;
+    gl.attach_shader(&program, &vertex_shader);
+    gl.attach_shader(&program, &fragment_shader);
+    gl.bind_attrib_location(&program, 0, "a_pos");
+    gl.link_program(&program);
+
+    let link_ok = gl
+        .get_program_parameter(&program, WebGl2RenderingContext::LINK_STATUS)
+        .as_bool()
+        .unwrap_or(false);
+    if !link_ok {
+        let log = gl
+            .get_program_info_log(&program)
+            .unwrap_or_else(|| "Unknown program link error".to_string());
+        return Err(JsValue::from_str(&format!("WebGL program link failed: {log}")));
+    }
+
+    let position_attrib = gl.get_attrib_location(&program, "a_pos");
+    if position_attrib < 0 {
+        return Err(JsValue::from_str("WebGL attribute a_pos not found"));
+    }
+
+    let color_uniform = gl
+        .get_uniform_location(&program, "u_color")
+        .ok_or_else(|| JsValue::from_str("WebGL uniform u_color not found"))?;
+
+    let vertex_buffer = gl
+        .create_buffer()
+        .ok_or_else(|| JsValue::from_str("Failed to create WebGL buffer"))?;
+
+    Ok(SimpleGlPainter {
+        program,
+        vertex_buffer,
+        position_attrib: position_attrib as u32,
+        color_uniform,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MvtGeomType {
+    Unknown = 0,
+    Point = 1,
+    LineString = 2,
+    Polygon = 3,
+}
+
+impl MvtGeomType {
+    fn from_u64(value: u64) -> Self {
+        match value {
+            1 => Self::Point,
+            2 => Self::LineString,
+            3 => Self::Polygon,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+struct ProtoReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ProtoReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+
+    fn read_varint(&mut self) -> Result<u64, String> {
+        let mut result = 0u64;
+        let mut shift = 0u32;
+
+        loop {
+            if self.pos >= self.bytes.len() {
+                return Err("Unexpected EOF while reading varint".to_string());
+            }
+            let byte = self.bytes[self.pos];
+            self.pos += 1;
+            result |= u64::from(byte & 0x7f) << shift;
+            if (byte & 0x80) == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return Err("Varint overflow".to_string());
+            }
+        }
+    }
+
+    fn read_key(&mut self) -> Result<(u32, u8), String> {
+        let key = self.read_varint()?;
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x07) as u8;
+        Ok((field, wire))
+    }
+
+    fn read_len_delimited(&mut self) -> Result<&'a [u8], String> {
+        let len = self.read_varint()? as usize;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or_else(|| "Length-delimited overflow".to_string())?;
+        if end > self.bytes.len() {
+            return Err("Unexpected EOF while reading length-delimited field".to_string());
+        }
+        let out = &self.bytes[self.pos..end];
+        self.pos = end;
+        Ok(out)
+    }
+
+    fn skip_field(&mut self, wire: u8) -> Result<(), String> {
+        match wire {
+            0 => {
+                let _ = self.read_varint()?;
+                Ok(())
+            }
+            1 => {
+                let end = self
+                    .pos
+                    .checked_add(8)
+                    .ok_or_else(|| "Fixed64 overflow".to_string())?;
+                if end > self.bytes.len() {
+                    return Err("Unexpected EOF while skipping fixed64".to_string());
+                }
+                self.pos = end;
+                Ok(())
+            }
+            2 => {
+                let _ = self.read_len_delimited()?;
+                Ok(())
+            }
+            5 => {
+                let end = self
+                    .pos
+                    .checked_add(4)
+                    .ok_or_else(|| "Fixed32 overflow".to_string())?;
+                if end > self.bytes.len() {
+                    return Err("Unexpected EOF while skipping fixed32".to_string());
+                }
+                self.pos = end;
+                Ok(())
+            }
+            _ => Err(format!("Unsupported protobuf wire type: {wire}")),
+        }
+    }
+}
+
+fn zigzag_decode_u32(value: u32) -> i32 {
+    ((value >> 1) as i32) ^ (-((value & 1) as i32))
+}
+
+fn decode_mvt_paths(geometry: &[u8]) -> Result<Vec<Vec<(i32, i32)>>, String> {
+    let mut reader = ProtoReader::new(geometry);
+    let mut x = 0i32;
+    let mut y = 0i32;
+    let mut command = 0u32;
+    let mut count = 0u32;
+    let mut paths: Vec<Vec<(i32, i32)>> = Vec::new();
+    let mut current: Vec<(i32, i32)> = Vec::new();
+
+    while !reader.eof() {
+        if count == 0 {
+            let cmd = reader.read_varint()? as u32;
+            command = cmd & 0x07;
+            count = cmd >> 3;
+            if count == 0 {
+                continue;
+            }
+        }
+
+        match command {
+            1 => {
+                for _ in 0..count {
+                    if !current.is_empty() {
+                        paths.push(current);
+                        current = Vec::new();
+                    }
+                    let dx = zigzag_decode_u32(reader.read_varint()? as u32);
+                    let dy = zigzag_decode_u32(reader.read_varint()? as u32);
+                    x = x.saturating_add(dx);
+                    y = y.saturating_add(dy);
+                    current.push((x, y));
+                }
+                count = 0;
+            }
+            2 => {
+                for _ in 0..count {
+                    let dx = zigzag_decode_u32(reader.read_varint()? as u32);
+                    let dy = zigzag_decode_u32(reader.read_varint()? as u32);
+                    x = x.saturating_add(dx);
+                    y = y.saturating_add(dy);
+                    current.push((x, y));
+                }
+                count = 0;
+            }
+            7 => {
+                // ClosePath has no parameters; keep rings open in the decoded representation.
+                if !current.is_empty() {
+                    paths.push(current);
+                    current = Vec::new();
+                }
+                count = 0;
+            }
+            other => return Err(format!("Unsupported MVT geometry command id: {other}")),
+        }
+    }
+
+    if !current.is_empty() {
+        paths.push(current);
+    }
+
+    Ok(paths)
+}
+
+fn normalize_mvt_path(path: &[(i32, i32)], extent: u32) -> Vec<[f32; 2]> {
+    let extent = extent.max(1) as f32;
+    path.iter()
+        .map(|(x, y)| [(*x as f32) / extent, (*y as f32) / extent])
+        .collect()
+}
+
+fn decode_mvt_tile_scene(bytes: &[u8]) -> Result<VectorTileScene, String> {
+    let mut scene = VectorTileScene::default();
+    let mut tile = ProtoReader::new(bytes);
+
+    while !tile.eof() {
+        let (field, wire) = tile.read_key()?;
+        if field == 3 && wire == 2 {
+            let layer_bytes = tile.read_len_delimited()?;
+            let mut layer_reader = ProtoReader::new(layer_bytes);
+            let mut layer_name = String::new();
+            let mut extent: u32 = 4096;
+            let mut feature_slices: Vec<&[u8]> = Vec::new();
+
+            while !layer_reader.eof() {
+                let (lf, lw) = layer_reader.read_key()?;
+                match (lf, lw) {
+                    (1, 2) => {
+                        let name_bytes = layer_reader.read_len_delimited()?;
+                        layer_name = String::from_utf8_lossy(name_bytes).into_owned();
+                    }
+                    (2, 2) => {
+                        feature_slices.push(layer_reader.read_len_delimited()?);
+                    }
+                    (5, 0) => {
+                        extent = (layer_reader.read_varint()? as u32).max(1);
+                    }
+                    _ => layer_reader.skip_field(lw)?,
+                }
+            }
+
+            let is_water_fill_layer = layer_name == "ocean" || layer_name == "water_polygons";
+            let is_line_layer =
+                layer_name == "streets" || layer_name == "boundaries" || layer_name == "water_lines";
+
+            if !is_water_fill_layer && !is_line_layer {
+                continue;
+            }
+
+            for feature_bytes in feature_slices {
+                let mut feature_reader = ProtoReader::new(feature_bytes);
+                let mut geom_type = MvtGeomType::Unknown;
+                let mut geometry_bytes: Option<&[u8]> = None;
+
+                while !feature_reader.eof() {
+                    let (ff, fw) = feature_reader.read_key()?;
+                    match (ff, fw) {
+                        (3, 0) => geom_type = MvtGeomType::from_u64(feature_reader.read_varint()?),
+                        (4, 2) => geometry_bytes = Some(feature_reader.read_len_delimited()?),
+                        _ => feature_reader.skip_field(fw)?,
+                    }
+                }
+
+                let Some(geometry_bytes) = geometry_bytes else {
+                    continue;
+                };
+                let paths = match decode_mvt_paths(geometry_bytes) {
+                    Ok(paths) => paths,
+                    Err(_) => continue,
+                };
+
+                if is_water_fill_layer && geom_type == MvtGeomType::Polygon {
+                    for path in paths {
+                        if path.len() >= 3 {
+                            scene.water_polygons.push(normalize_mvt_path(&path, extent));
+                        }
+                    }
+                    continue;
+                }
+
+                if is_line_layer && geom_type == MvtGeomType::LineString {
+                    for path in paths {
+                        if path.len() >= 2 {
+                            scene.transportation_lines.push(normalize_mvt_path(&path, extent));
+                        }
+                    }
+                    continue;
+                }
+
+                match (layer_name.as_str(), geom_type) {
+                    // Additional polygon roads are treated as line-only later; ignored for now.
+                    ("street_polygons", MvtGeomType::Polygon) => {
+                        // TODO: polygon road fill styling for higher zoom levels.
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            tile.skip_field(wire)?;
+        }
+    }
+
+    Ok(scene)
+}
+
+#[derive(Clone)]
+struct CachedVectorTile {
+    scene: VectorTileScene,
+    byte_len: usize,
+    last_used: u64,
+}
+
+struct VectorEngineState {
+    surface: CanvasSurface,
+    gl: Option<WebGl2RenderingContext>,
+    painter: Option<SimpleGlPainter>,
+    ctx2d: Option<RenderContext>,
+    width: f64,
+    height: f64,
+    dpr: f64,
+    tile_url_template: String,
+    min_zoom: u8,
+    max_zoom: u8,
+    tile_size: u32,
+    zoom: f64,
+    center_lon: f64,
+    center_lat: f64,
+    dragging: Option<DragState>,
+    cache_tick: u64,
+    cache_limit: usize,
+    tile_cache: HashMap<TileKey, CachedVectorTile>,
+    pending_tiles: HashSet<TileKey>,
+    high_priority_queue: VecDeque<TileKey>,
+    medium_priority_queue: VecDeque<TileKey>,
+    low_priority_queue: VecDeque<TileKey>,
+    in_flight_requests: usize,
+    max_in_flight_requests: usize,
+    source_max_zoom: u8,
+    backend_kind: VectorBackendKind,
+}
+
+impl VectorEngineState {
+    fn zoom_scale_for_delta(render_zoom: u8, zoom: f64) -> f64 {
+        2.0_f64.powf(zoom - f64::from(render_zoom))
+    }
+
+    fn zoom_clamp_f64(&self, zoom: f64) -> f64 {
+        zoom.clamp(f64::from(self.min_zoom), f64::from(self.max_zoom))
+    }
+
+    fn resize(&mut self, width: u32, height: u32, dpr: f32) {
+        self.width = f64::from(width);
+        self.height = f64::from(height);
+        self.dpr = f64::from(dpr.max(0.1));
+
+        let pixel_width = (self.width * self.dpr).round().max(1.0) as u32;
+        let pixel_height = (self.height * self.dpr).round().max(1.0) as u32;
+        self.surface.set_pixel_size(pixel_width, pixel_height);
+        if let Some(gl) = &self.gl {
+            gl.viewport(0, 0, pixel_width as i32, pixel_height as i32);
+        }
+    }
+
+    fn set_view(&mut self, lon: f64, lat: f32, zoom: f32) {
+        self.center_lon = normalize_lon(lon);
+        self.center_lat = clamp_lat(f64::from(lat));
+        self.zoom = self.zoom_clamp_f64(f64::from(zoom));
+    }
+
+    fn tile_url(&self, key: TileKey) -> String {
+        self.tile_url_template
+            .replace("{z}", &key.z.to_string())
+            .replace("{x}", &key.x.to_string())
+            .replace("{y}", &key.y.to_string())
+    }
+
+    fn set_tile_url_template(&mut self, template: String) {
+        if self.tile_url_template == template {
+            return;
+        }
+
+        self.tile_url_template = template;
+        self.pending_tiles.clear();
+        self.high_priority_queue.clear();
+        self.medium_priority_queue.clear();
+        self.low_priority_queue.clear();
+        self.in_flight_requests = 0;
+        self.tile_cache.clear();
+    }
+
+    fn is_zoom_relevant_for_view(&self, tile_zoom: u8) -> bool {
+        let target_zoom = self.zoom.round() as i32;
+        let tile_zoom = i32::from(tile_zoom);
+        (tile_zoom - target_zoom).abs() <= 2
+    }
+
+    fn enqueue_tile_request(&mut self, key: TileKey, priority: RequestPriority) {
+        if self.tile_cache.contains_key(&key) || self.pending_tiles.contains(&key) {
+            return;
+        }
+
+        self.pending_tiles.insert(key);
+        match priority {
+            RequestPriority::High => self.high_priority_queue.push_back(key),
+            RequestPriority::Medium => self.medium_priority_queue.push_back(key),
+            RequestPriority::Low => self.low_priority_queue.push_back(key),
+        }
+    }
+
+    fn dequeue_next_request(&mut self) -> Option<TileKey> {
+        self.high_priority_queue
+            .pop_front()
+            .or_else(|| self.medium_priority_queue.pop_front())
+            .or_else(|| self.low_priority_queue.pop_front())
+    }
+
+    fn insert_tile_scene(&mut self, key: TileKey, scene: VectorTileScene, byte_len: usize) {
+        self.cache_tick = self.cache_tick.saturating_add(1);
+        self.tile_cache.insert(
+            key,
+            CachedVectorTile {
+                scene,
+                byte_len,
+                last_used: self.cache_tick,
+            },
+        );
+
+        if self.tile_cache.len() > self.cache_limit {
+            if let Some((evict_key, _)) = self
+                .tile_cache
+                .iter()
+                .min_by_key(|(_, value)| value.last_used)
+                .map(|(key, value)| (*key, value.last_used))
+            {
+                self.tile_cache.remove(&evict_key);
+            }
+        }
+    }
+
+    fn screen_px_to_ndc(&self, screen_x: f64, screen_y: f64, pixel_width: f64, pixel_height: f64) -> [f32; 2] {
+        let px = screen_x * self.dpr;
+        let py = screen_y * self.dpr;
+        [
+            ((px / pixel_width) * 2.0 - 1.0) as f32,
+            (1.0 - (py / pixel_height) * 2.0) as f32,
+        ]
+    }
+
+    fn append_tile_scene_geometry(
+        &self,
+        scene: &VectorTileScene,
+        tile_screen_x: f64,
+        tile_screen_y: f64,
+        tile_display_size: f64,
+        pixel_width: f64,
+        pixel_height: f64,
+        water_triangles_ndc: &mut Vec<f32>,
+        transportation_segments_ndc: &mut Vec<f32>,
+    ) {
+        if tile_display_size <= 0.0 {
+            return;
+        }
+
+        for ring in &scene.water_polygons {
+            if ring.len() < 3 {
+                continue;
+            }
+
+            let mut points_ndc: Vec<[f32; 2]> = Vec::with_capacity(ring.len());
+            for point in ring {
+                let screen_x = tile_screen_x + f64::from(point[0]) * tile_display_size;
+                let screen_y = tile_screen_y + f64::from(point[1]) * tile_display_size;
+                points_ndc.push(self.screen_px_to_ndc(screen_x, screen_y, pixel_width, pixel_height));
+            }
+
+            // Naive triangle fan triangulation. This is acceptable for the MVP proof but can
+            // produce artifacts on complex concave polygons; real triangulation comes next.
+            for index in 1..(points_ndc.len().saturating_sub(1)) {
+                let a = points_ndc[0];
+                let b = points_ndc[index];
+                let c = points_ndc[index + 1];
+                water_triangles_ndc.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
+            }
+        }
+
+        for path in &scene.transportation_lines {
+            if path.len() < 2 {
+                continue;
+            }
+
+            for segment in path.windows(2) {
+                let start = segment[0];
+                let end = segment[1];
+                let start_ndc = self.screen_px_to_ndc(
+                    tile_screen_x + f64::from(start[0]) * tile_display_size,
+                    tile_screen_y + f64::from(start[1]) * tile_display_size,
+                    pixel_width,
+                    pixel_height,
+                );
+                let end_ndc = self.screen_px_to_ndc(
+                    tile_screen_x + f64::from(end[0]) * tile_display_size,
+                    tile_screen_y + f64::from(end[1]) * tile_display_size,
+                    pixel_width,
+                    pixel_height,
+                );
+                transportation_segments_ndc.extend_from_slice(&[
+                    start_ndc[0],
+                    start_ndc[1],
+                    end_ndc[0],
+                    end_ndc[1],
+                ]);
+            }
+        }
+    }
+
+    fn project_lon_lat_to_screen(&self, lon: f64, lat: f64) -> Option<ProjectedPoint> {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return None;
+        }
+
+        let render_zoom = self.zoom.round().clamp(f64::from(self.min_zoom), f64::from(self.max_zoom)) as u8;
+        let (center_world_x, center_world_y) =
+            lon_lat_to_world(self.center_lon, self.center_lat, render_zoom, self.tile_size);
+        let (point_world_x, point_world_y) =
+            lon_lat_to_world(lon, lat, render_zoom, self.tile_size);
+        let display_scale = Self::zoom_scale_for_delta(render_zoom, self.zoom);
+
+        Some(ProjectedPoint {
+            screen_x: self.width * 0.5 + (point_world_x - center_world_x) * display_scale,
+            screen_y: self.height * 0.5 + (point_world_y - center_world_y) * display_scale,
+        })
+    }
+
+    fn queue_visible_tiles(&mut self) -> (u8, f64, f64, f64) {
+        let render_zoom = self
+            .zoom
+            .round()
+            .clamp(f64::from(self.min_zoom), f64::from(self.max_zoom)) as u8;
+        let fetch_zoom = render_zoom.min(self.source_max_zoom);
+        let tile_size_f = f64::from(self.tile_size);
+        let display_scale = Self::zoom_scale_for_delta(fetch_zoom, self.zoom);
+        let (center_world_x, center_world_y) =
+            lon_lat_to_world(self.center_lon, self.center_lat, fetch_zoom, self.tile_size);
+        let top_left_world_x = center_world_x - (self.width * 0.5) / display_scale;
+        let top_left_world_y = center_world_y - (self.height * 0.5) / display_scale;
+        let tiles_per_axis = 1u32 << fetch_zoom;
+        let world_span = tile_size_f * f64::from(tiles_per_axis);
+        let viewport_world_w = self.width / display_scale;
+        let viewport_world_h = self.height / display_scale;
+
+        let min_tx = (top_left_world_x / tile_size_f).floor() as i64 - i64::from(TILE_PREFETCH_MARGIN);
+        let max_tx = ((top_left_world_x + viewport_world_w) / tile_size_f).ceil() as i64
+            + i64::from(TILE_PREFETCH_MARGIN);
+        let min_ty = (top_left_world_y / tile_size_f).floor() as i64 - i64::from(TILE_PREFETCH_MARGIN);
+        let max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64
+            + i64::from(TILE_PREFETCH_MARGIN);
+
+        for ty in min_ty..=max_ty {
+            if ty < 0 || ty >= i64::from(tiles_per_axis) {
+                continue;
+            }
+
+            for tx in min_tx..=max_tx {
+                let wrapped_tx = tx.rem_euclid(i64::from(tiles_per_axis)) as u32;
+                let key = TileKey {
+                    z: fetch_zoom,
+                    x: wrapped_tx,
+                    y: ty as u32,
+                };
+
+                let is_visible = tx >= min_tx + i64::from(TILE_PREFETCH_MARGIN)
+                    && tx <= max_tx - i64::from(TILE_PREFETCH_MARGIN)
+                    && ty >= min_ty + i64::from(TILE_PREFETCH_MARGIN)
+                    && ty <= max_ty - i64::from(TILE_PREFETCH_MARGIN);
+                let priority = if is_visible {
+                    RequestPriority::High
+                } else {
+                    RequestPriority::Medium
+                };
+                self.enqueue_tile_request(key, priority);
+            }
+        }
+
+        // Wrap top-left x into world span to keep screen placement stable for rendering.
+        let wrapped_top_left_x = top_left_world_x.rem_euclid(world_span);
+        (fetch_zoom, display_scale, wrapped_top_left_x, top_left_world_y)
+    }
+
+    fn draw(&mut self) {
+        if self.gl.is_some() {
+            self.draw_webgl();
+        } else {
+            self.draw_canvas2d();
+        }
+    }
+
+    fn draw_canvas2d(&mut self) {
+        let Some(ctx) = self.ctx2d.clone() else {
+            return;
+        };
+
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+
+        let _ = ctx.set_transform(self.dpr, 0.0, 0.0, self.dpr, 0.0, 0.0);
+        ctx.set_fill_style_str("#f4f4f2");
+        ctx.fill_rect(0.0, 0.0, self.width, self.height);
+
+        let (fetch_zoom, display_scale, wrapped_top_left_x, top_left_world_y) = self.queue_visible_tiles();
+        let tile_size_f = f64::from(self.tile_size);
+        let tile_display_size = tile_size_f * display_scale;
+        if tile_display_size <= 0.0 {
+            return;
+        }
+
+        let tiles_per_axis = 1u32 << fetch_zoom;
+        let viewport_world_w = self.width / display_scale;
+        let viewport_world_h = self.height / display_scale;
+
+        let min_tx = (wrapped_top_left_x / tile_size_f).floor() as i64 - 1;
+        let max_tx = ((wrapped_top_left_x + viewport_world_w) / tile_size_f).ceil() as i64 + 1;
+        let min_ty = (top_left_world_y / tile_size_f).floor() as i64 - 1;
+        let max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64 + 1;
+
+        for ty in min_ty..=max_ty {
+            if ty < 0 || ty >= i64::from(tiles_per_axis) {
+                continue;
+            }
+
+            for tx in min_tx..=max_tx {
+                let wrapped_tx = tx.rem_euclid(i64::from(tiles_per_axis)) as u32;
+                let key = TileKey {
+                    z: fetch_zoom,
+                    x: wrapped_tx,
+                    y: ty as u32,
+                };
+
+                let tile_world_x = (tx as f64) * tile_size_f;
+                let screen_x = (tile_world_x - wrapped_top_left_x) * display_scale;
+                let screen_y = ((ty as f64) * tile_size_f - top_left_world_y) * display_scale;
+
+                if screen_x > self.width + tile_display_size
+                    || screen_y > self.height + tile_display_size
+                    || screen_x + tile_display_size < -tile_display_size
+                    || screen_y + tile_display_size < -tile_display_size
+                {
+                    continue;
+                }
+
+                ctx.set_fill_style_str("#eceeea");
+                ctx.fill_rect(screen_x, screen_y, tile_display_size, tile_display_size);
+                ctx.set_fill_style_str("#f6f6f4");
+                ctx.fill_rect(
+                    screen_x + 1.0,
+                    screen_y + 1.0,
+                    (tile_display_size - 2.0).max(0.0),
+                    (tile_display_size - 2.0).max(0.0),
+                );
+
+                if let Some(tile) = self.tile_cache.get_mut(&key) {
+                    self.cache_tick = self.cache_tick.saturating_add(1);
+                    tile.last_used = self.cache_tick;
+
+                    for ring in &tile.scene.water_polygons {
+                        if ring.len() < 3 {
+                            continue;
+                        }
+                        ctx.set_fill_style_str("#b3dbf2");
+                        ctx.begin_path();
+                        let first = ring[0];
+                        ctx.move_to(
+                            screen_x + f64::from(first[0]) * tile_display_size,
+                            screen_y + f64::from(first[1]) * tile_display_size,
+                        );
+                        for point in ring.iter().skip(1) {
+                            ctx.line_to(
+                                screen_x + f64::from(point[0]) * tile_display_size,
+                                screen_y + f64::from(point[1]) * tile_display_size,
+                            );
+                        }
+                        ctx.fill();
+                    }
+
+                    if !tile.scene.transportation_lines.is_empty() {
+                        ctx.set_stroke_style_str("#626b76");
+                        ctx.set_line_width((1.0 + display_scale * 0.15).clamp(1.0, 2.5));
+                        for path in &tile.scene.transportation_lines {
+                            if path.len() < 2 {
+                                continue;
+                            }
+                            ctx.begin_path();
+                            let first = path[0];
+                            ctx.move_to(
+                                screen_x + f64::from(first[0]) * tile_display_size,
+                                screen_y + f64::from(first[1]) * tile_display_size,
+                            );
+                            for point in path.iter().skip(1) {
+                                ctx.line_to(
+                                    screen_x + f64::from(point[0]) * tile_display_size,
+                                    screen_y + f64::from(point[1]) * tile_display_size,
+                                );
+                            }
+                            ctx.stroke();
+                        }
+                    }
+                } else if self.pending_tiles.contains(&key) {
+                    ctx.set_fill_style_str("#f2f2ef");
+                    ctx.fill_rect(
+                        screen_x + 1.0,
+                        screen_y + 1.0,
+                        (tile_display_size - 2.0).max(0.0),
+                        (tile_display_size - 2.0).max(0.0),
+                    );
+                }
+            }
+        }
+    }
+
+    fn draw_webgl(&mut self) {
+        let Some(gl) = self.gl.clone() else {
+            return;
+        };
+
+        let pixel_width = (self.width * self.dpr).round().max(1.0) as i32;
+        let pixel_height = (self.height * self.dpr).round().max(1.0) as i32;
+        gl.viewport(0, 0, pixel_width, pixel_height);
+        gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+        gl.disable(WebGl2RenderingContext::BLEND);
+        gl.clear_color(0.956, 0.956, 0.952, 1.0);
+        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+
+        let (fetch_zoom, display_scale, wrapped_top_left_x, top_left_world_y) = self.queue_visible_tiles();
+        let tile_size_f = f64::from(self.tile_size);
+        let tile_display_size = tile_size_f * display_scale;
+        if tile_display_size <= 0.0 {
+            return;
+        }
+
+        let tiles_per_axis = 1u32 << fetch_zoom;
+        let viewport_world_w = self.width / display_scale;
+        let viewport_world_h = self.height / display_scale;
+
+        let min_tx = (wrapped_top_left_x / tile_size_f).floor() as i64 - 1;
+        let max_tx = ((wrapped_top_left_x + viewport_world_w) / tile_size_f).ceil() as i64 + 1;
+        let min_ty = (top_left_world_y / tile_size_f).floor() as i64 - 1;
+        let max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64 + 1;
+
+        let mut water_triangles_ndc: Vec<f32> = Vec::new();
+        let mut transportation_segments_ndc: Vec<f32> = Vec::new();
+        let pixel_width_f = f64::from(pixel_width.max(1));
+        let pixel_height_f = f64::from(pixel_height.max(1));
+
+        gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+
+        for ty in min_ty..=max_ty {
+            if ty < 0 || ty >= i64::from(tiles_per_axis) {
+                continue;
+            }
+
+            for tx in min_tx..=max_tx {
+                let wrapped_tx = tx.rem_euclid(i64::from(tiles_per_axis)) as u32;
+                let key = TileKey {
+                    z: fetch_zoom,
+                    x: wrapped_tx,
+                    y: ty as u32,
+                };
+
+                let tile_world_x = (tx as f64) * tile_size_f;
+                let screen_x = (tile_world_x - wrapped_top_left_x) * display_scale;
+                let screen_y = ((ty as f64) * tile_size_f - top_left_world_y) * display_scale;
+
+                if screen_x > self.width + tile_display_size
+                    || screen_y > self.height + tile_display_size
+                    || screen_x + tile_display_size < -tile_display_size
+                    || screen_y + tile_display_size < -tile_display_size
+                {
+                    continue;
+                }
+
+                let mut border_color = (0.926_f32, 0.930_f32, 0.924_f32);
+                let mut fill_color = (0.948_f32, 0.949_f32, 0.944_f32);
+                let mut tile_loaded = false;
+                let mut tile_scene_for_draw: Option<VectorTileScene> = None;
+
+                let x_px = (screen_x * self.dpr).round() as i32;
+                let y_px = ((self.height - (screen_y + tile_display_size)) * self.dpr).round() as i32;
+                let w_px = ((tile_display_size * self.dpr).round() as i32).max(1);
+                let h_px = ((tile_display_size * self.dpr).round() as i32).max(1);
+
+                if let Some(tile) = self.tile_cache.get_mut(&key) {
+                    tile_loaded = true;
+                    self.cache_tick = self.cache_tick.saturating_add(1);
+                    tile.last_used = self.cache_tick;
+                    let size_mod = ((tile.byte_len as u32) % 89) as f32 / 89.0;
+                    fill_color = (
+                        0.946 - size_mod * 0.010,
+                        0.948 - size_mod * 0.010,
+                        0.943 - size_mod * 0.008,
+                    );
+                    border_color = (0.932, 0.936, 0.930);
+                    tile_scene_for_draw = Some(tile.scene.clone());
+                } else if self.pending_tiles.contains(&key) {
+                    fill_color = (0.942, 0.943, 0.938);
+                    border_color = (0.922, 0.924, 0.918);
+                }
+
+                if let Some(scene) = tile_scene_for_draw.as_ref() {
+                    self.append_tile_scene_geometry(
+                        scene,
+                        screen_x,
+                        screen_y,
+                        tile_display_size,
+                        pixel_width_f,
+                        pixel_height_f,
+                        &mut water_triangles_ndc,
+                        &mut transportation_segments_ndc,
+                    );
+                }
+
+                gl.scissor(x_px, y_px, w_px, h_px);
+                gl.clear_color(border_color.0, border_color.1, border_color.2, 1.0);
+                gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+
+                if w_px > 2 && h_px > 2 {
+                    gl.scissor(x_px + 1, y_px + 1, w_px - 2, h_px - 2);
+                    gl.clear_color(fill_color.0, fill_color.1, fill_color.2, 1.0);
+                    gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+                }
+
+                if tile_loaded && w_px > 4 && h_px > 4 {
+                    gl.scissor(x_px + 2, y_px + 2, w_px - 4, h_px - 4);
+                    gl.clear_color(0.962, 0.962, 0.958, 1.0);
+                    gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+                }
+            }
+        }
+
+        gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+        if let Some(painter) = self.painter.clone() {
+            painter.draw_arrays(
+                &gl,
+                WebGl2RenderingContext::TRIANGLES,
+                &water_triangles_ndc,
+                [0.70, 0.86, 0.95, 1.0],
+            );
+            gl.line_width(1.0);
+            painter.draw_arrays(
+                &gl,
+                WebGl2RenderingContext::LINES,
+                &transportation_segments_ndc,
+                [0.36, 0.39, 0.43, 1.0],
+            );
+        }
+    }
+
+    fn get_view_state(&self) -> ViewState {
+        ViewState {
+            lon: self.center_lon,
+            lat: self.center_lat,
+            zoom: self.zoom,
+        }
+    }
+}
+
+fn request_vector_tile(state: Rc<RefCell<VectorEngineState>>, key: TileKey, url: String) {
+    spawn_local(async move {
+        let request_url = url.clone();
+        let result = fetch_tile_bytes(url).await.and_then(|value| {
+            let bytes = Uint8Array::new(&value).to_vec();
+            Ok(bytes)
+        });
+
+        {
+            let mut state_mut = state.borrow_mut();
+            state_mut.pending_tiles.remove(&key);
+            state_mut.in_flight_requests = state_mut.in_flight_requests.saturating_sub(1);
+
+            let is_current_source = state_mut.tile_url(key) == request_url;
+            let is_relevant_zoom = state_mut.is_zoom_relevant_for_view(key.z);
+
+            if is_current_source && is_relevant_zoom {
+                if let Ok(bytes) = result {
+                    if let Ok(scene) = decode_mvt_tile_scene(&bytes) {
+                        state_mut.insert_tile_scene(key, scene, bytes.len());
+                    }
+                }
+            }
+        }
+
+        pump_vector_requests(state.clone());
+    });
+}
+
+fn pump_vector_requests(state: Rc<RefCell<VectorEngineState>>) {
+    loop {
+        let next = {
+            let mut state_mut = state.borrow_mut();
+
+            if state_mut.in_flight_requests >= state_mut.max_in_flight_requests {
+                None
+            } else if let Some(key) = state_mut.dequeue_next_request() {
+                state_mut.in_flight_requests += 1;
+                let url = state_mut.tile_url(key);
+                Some((key, url))
+            } else {
+                None
+            }
+        };
+
+        let Some((key, url)) = next else {
+            break;
+        };
+
+        request_vector_tile(state.clone(), key, url);
+    }
+}
+
+fn make_gl_canvas_surface(
+    canvas_or_offscreen: JsValue,
+) -> Result<(CanvasSurface, WebGl2RenderingContext), JsValue> {
+    if let Ok(canvas) = canvas_or_offscreen.clone().dyn_into::<HtmlCanvasElement>() {
+        let ctx = canvas
+            .get_context("webgl2")?
+            .ok_or_else(|| JsValue::from_str("WebGL2 context is not available"))?
+            .dyn_into::<WebGl2RenderingContext>()?;
+        return Ok((CanvasSurface::Html(canvas), ctx));
+    }
+
+    if let Ok(canvas) = canvas_or_offscreen.dyn_into::<OffscreenCanvas>() {
+        let ctx = canvas
+            .get_context("webgl2")?
+            .ok_or_else(|| JsValue::from_str("Offscreen WebGL2 context is not available"))?
+            .dyn_into::<WebGl2RenderingContext>()?;
+        return Ok((CanvasSurface::Offscreen(canvas), ctx));
+    }
+
+    Err(JsValue::from_str(
+        "init_engine expected HTMLCanvasElement or OffscreenCanvas",
+    ))
+}
+
+#[wasm_bindgen]
+pub struct VectorMapEngine {
+    state: Rc<RefCell<VectorEngineState>>,
+}
+
+#[wasm_bindgen]
+pub fn init_vector_engine(
+    canvas_or_offscreen: JsValue,
+    config: JsValue,
+) -> Result<VectorMapEngine, JsValue> {
+    PANIC_HOOK.call_once(console_error_panic_hook::set_once);
+
+    let config: InitConfig = if config.is_undefined() || config.is_null() {
+        InitConfig::default()
+    } else {
+        serde_wasm_bindgen::from_value(config)?
+    };
+
+    let vector_source = config.vector_source;
+    let tile_url_template = vector_source
+        .as_ref()
+        .and_then(|source| source.tile_url_template.clone())
+        .or(config.tile_url_template)
+        .unwrap_or_else(|| "https://vector.openstreetmap.org/shortbread_v1/{z}/{x}/{y}.mvt".to_string());
+    let min_zoom = config.min_zoom.unwrap_or(0);
+    let max_zoom = config.max_zoom.unwrap_or(14).max(min_zoom);
+    let tile_size = config.tile_size.unwrap_or(512).max(64);
+    let cache_limit = config.cache_size.unwrap_or(1024).max(64);
+    let source_max_zoom = vector_source
+        .as_ref()
+        .and_then(|source| source.source_max_zoom)
+        .unwrap_or(max_zoom)
+        .max(min_zoom);
+    let backend_preference = vector_source
+        .as_ref()
+        .and_then(|source| source.backend_preference.as_deref())
+        .unwrap_or("webgl2");
+    let preferred_webgl_backend_kind =
+        if backend_preference.eq_ignore_ascii_case("webgpu") && webgpu_supported() {
+        VectorBackendKind::WebGpuFallbackWebGl2
+    } else {
+        VectorBackendKind::WebGl2
+    };
+
+    let (surface, gl, painter, ctx2d, backend_kind) = match make_gl_canvas_surface(canvas_or_offscreen.clone()) {
+        Ok((surface, gl)) => {
+            gl.disable(WebGl2RenderingContext::DEPTH_TEST);
+            gl.disable(WebGl2RenderingContext::BLEND);
+            let painter = create_simple_gl_painter(&gl).ok();
+            (surface, Some(gl), painter, None, preferred_webgl_backend_kind)
+        }
+        Err(_) => {
+            let (surface, ctx2d) = make_canvas_surface(canvas_or_offscreen)?;
+            (surface, None, None, Some(ctx2d), VectorBackendKind::Canvas2d)
+        }
+    };
+
+    let state = VectorEngineState {
+        surface,
+        gl,
+        painter,
+        ctx2d,
+        width: 1024.0,
+        height: 768.0,
+        dpr: 1.0,
+        tile_url_template,
+        min_zoom,
+        max_zoom,
+        tile_size,
+        zoom: 2.0_f64.clamp(f64::from(min_zoom), f64::from(max_zoom)),
+        center_lon: 0.0,
+        center_lat: 20.0,
+        dragging: None,
+        cache_tick: 0,
+        cache_limit,
+        tile_cache: HashMap::new(),
+        pending_tiles: HashSet::new(),
+        high_priority_queue: VecDeque::new(),
+        medium_priority_queue: VecDeque::new(),
+        low_priority_queue: VecDeque::new(),
+        in_flight_requests: 0,
+        max_in_flight_requests: MAX_IN_FLIGHT_REQUESTS,
+        source_max_zoom,
+        backend_kind,
+    };
+
+    Ok(VectorMapEngine {
+        state: Rc::new(RefCell::new(state)),
+    })
+}
+
+#[wasm_bindgen]
+impl VectorMapEngine {
+    pub fn resize(&mut self, width: u32, height: u32, dpr: f32) {
+        self.state.borrow_mut().resize(width, height, dpr);
+    }
+
+    pub fn pointer_down(&mut self, x: f32, y: f32, button: u8) {
+        if button != 0 {
+            return;
+        }
+
+        let mut state = self.state.borrow_mut();
+        let render_zoom = state.zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
+        let (world_x, world_y) =
+            lon_lat_to_world(state.center_lon, state.center_lat, render_zoom, state.tile_size);
+        state.dragging = Some(DragState {
+            start_x: f64::from(x),
+            start_y: f64::from(y),
+            start_world0_x: world_x,
+            start_world0_y: world_y,
+        });
+    }
+
+    pub fn pointer_move(&mut self, x: f32, y: f32) {
+        let mut state = self.state.borrow_mut();
+        let dragging = match state.dragging {
+            Some(dragging) => dragging,
+            None => return,
+        };
+
+        let render_zoom = state.zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
+        let dx = f64::from(x) - dragging.start_x;
+        let dy = f64::from(y) - dragging.start_y;
+        let display_scale = VectorEngineState::zoom_scale_for_delta(render_zoom, state.zoom);
+        let new_world_x = dragging.start_world0_x - (dx / display_scale);
+        let new_world_y = dragging.start_world0_y - (dy / display_scale);
+        let (lon, lat) = world_to_lon_lat(new_world_x, new_world_y, render_zoom, state.tile_size);
+        state.center_lon = normalize_lon(lon);
+        state.center_lat = clamp_lat(lat);
+    }
+
+    pub fn pointer_up(&mut self, _x: f32, _y: f32) {
+        self.state.borrow_mut().dragging = None;
+    }
+
+    pub fn wheel(&mut self, delta_y: f32, x: f32, y: f32, _ctrl_key: bool) {
+        if delta_y.abs() < f32::EPSILON {
+            return;
+        }
+
+        let mut state = self.state.borrow_mut();
+        let old_zoom = state.zoom;
+        let zoom_delta = -f64::from(delta_y) * WHEEL_ZOOM_SENSITIVITY;
+        let new_zoom = state.zoom_clamp_f64(old_zoom + zoom_delta);
+        if (new_zoom - old_zoom).abs() < f64::EPSILON {
+            return;
+        }
+
+        let old_render_zoom = old_zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
+        let new_render_zoom = new_zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
+        let cursor_x = f64::from(x);
+        let cursor_y = f64::from(y);
+        let (old_center_world_x, old_center_world_y) =
+            lon_lat_to_world(state.center_lon, state.center_lat, old_render_zoom, state.tile_size);
+        let old_display_scale = VectorEngineState::zoom_scale_for_delta(old_render_zoom, old_zoom);
+        let focus_world_x = old_center_world_x + (cursor_x - state.width / 2.0) / old_display_scale;
+        let focus_world_y = old_center_world_y + (cursor_y - state.height / 2.0) / old_display_scale;
+
+        // Reproject focus point through lon/lat when rounded render zoom changes.
+        let (focus_lon, focus_lat) =
+            world_to_lon_lat(focus_world_x, focus_world_y, old_render_zoom, state.tile_size);
+        let (focus_world_x_new, focus_world_y_new) =
+            lon_lat_to_world(focus_lon, focus_lat, new_render_zoom, state.tile_size);
+        let new_display_scale = VectorEngineState::zoom_scale_for_delta(new_render_zoom, new_zoom);
+        let new_center_world_x = focus_world_x_new - (cursor_x - state.width / 2.0) / new_display_scale;
+        let new_center_world_y = focus_world_y_new - (cursor_y - state.height / 2.0) / new_display_scale;
+        let (center_lon, center_lat) =
+            world_to_lon_lat(new_center_world_x, new_center_world_y, new_render_zoom, state.tile_size);
+
+        state.zoom = new_zoom;
+        state.center_lon = normalize_lon(center_lon);
+        state.center_lat = clamp_lat(center_lat);
+    }
+
+    pub fn set_view(&mut self, lon: f64, lat: f64, zoom: f32) {
+        self.state.borrow_mut().set_view(lon, lat as f32, zoom);
+    }
+
+    pub fn zoom_to_box(&mut self, start_x: f32, start_y: f32, end_x: f32, end_y: f32) {
+        let mut state = self.state.borrow_mut();
+        let min_x = f64::from(start_x.min(end_x));
+        let max_x = f64::from(start_x.max(end_x));
+        let min_y = f64::from(start_y.min(end_y));
+        let max_y = f64::from(start_y.max(end_y));
+        let box_w = (max_x - min_x).abs();
+        let box_h = (max_y - min_y).abs();
+        if box_w < 4.0 || box_h < 4.0 || state.width <= 0.0 || state.height <= 0.0 {
+            return;
+        }
+
+        let render_zoom = state.zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
+        let display_scale = VectorEngineState::zoom_scale_for_delta(render_zoom, state.zoom);
+        let (center_world_x, center_world_y) =
+            lon_lat_to_world(state.center_lon, state.center_lat, render_zoom, state.tile_size);
+        let top_left_world_x = center_world_x - (state.width / 2.0) / display_scale;
+        let top_left_world_y = center_world_y - (state.height / 2.0) / display_scale;
+
+        let min_world_x = top_left_world_x + min_x / display_scale;
+        let max_world_x = top_left_world_x + max_x / display_scale;
+        let min_world_y = top_left_world_y + min_y / display_scale;
+        let max_world_y = top_left_world_y + max_y / display_scale;
+
+        let world_w = (max_world_x - min_world_x).abs().max(1e-9);
+        let world_h = (max_world_y - min_world_y).abs().max(1e-9);
+        let target_scale = ((state.width / world_w).min(state.height / world_h) * BOX_ZOOM_FIT_PADDING).max(1e-9);
+        let target_zoom = state.zoom_clamp_f64(f64::from(render_zoom) + target_scale.log2());
+        let target_render_zoom =
+            target_zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
+        let mid_world_x = (min_world_x + max_world_x) * 0.5;
+        let mid_world_y = (min_world_y + max_world_y) * 0.5;
+        let (mid_lon, mid_lat) = world_to_lon_lat(mid_world_x, mid_world_y, render_zoom, state.tile_size);
+        let (target_lon, target_lat) = if target_render_zoom == render_zoom {
+            (mid_lon, mid_lat)
+        } else {
+            let (wx, wy) = lon_lat_to_world(mid_lon, mid_lat, target_render_zoom, state.tile_size);
+            world_to_lon_lat(wx, wy, target_render_zoom, state.tile_size)
+        };
+
+        state.zoom = target_zoom;
+        state.center_lon = normalize_lon(target_lon);
+        state.center_lat = clamp_lat(target_lat);
+    }
+
+    pub fn place_marker(&mut self, _x: f32, _y: f32) {}
+
+    pub fn add_marker_lon_lat(&mut self, _lon: f64, _lat: f64) {}
+
+    pub fn remove_marker_lon_lat(&mut self, _lon: f64, _lat: f64) {}
+
+    pub fn place_marker_with_info(&mut self, _x: f32, _y: f32) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&Option::<PlacedMarker>::None).map_err(Into::into)
+    }
+
+    pub fn hit_test_marker(&self, _x: f32, _y: f32) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(&Option::<MarkerHover>::None).map_err(Into::into)
+    }
+
+    pub fn project_lon_lat(&self, lon: f64, lat: f64) -> Result<JsValue, JsValue> {
+        let state = self.state.borrow();
+        let projected = state.project_lon_lat_to_screen(lon, lat);
+        serde_wasm_bindgen::to_value(&projected).map_err(Into::into)
+    }
+
+    pub fn get_view(&self) -> Result<JsValue, JsValue> {
+        let view = self.state.borrow().get_view_state();
+        serde_wasm_bindgen::to_value(&view).map_err(Into::into)
+    }
+
+    pub fn get_engine_kind(&self) -> String {
+        "vector".to_string()
+    }
+
+    pub fn get_render_backend(&self) -> String {
+        self.state.borrow().backend_kind.as_str().to_string()
+    }
+
+    pub fn remove_recent_markers(&mut self, _count: u32) {}
+
+    pub fn frame(&mut self, _now_ms: f64) {
+        self.state.borrow_mut().draw();
+        pump_vector_requests(self.state.clone());
+    }
+
+    pub fn load_trajectory_csv(&mut self, _bytes: Vec<u8>) -> Result<JsValue, JsValue> {
+        let result = CsvLoadResult {
+            valid_rows: 0,
+            invalid_rows: 0,
+            bounds: None,
+        };
+        serde_wasm_bindgen::to_value(&result).map_err(Into::into)
+    }
+
+    pub fn load_marker_csv(&mut self, _bytes: Vec<u8>) -> Result<JsValue, JsValue> {
+        let result = CsvLoadResult {
+            valid_rows: 0,
+            invalid_rows: 0,
+            bounds: None,
+        };
+        serde_wasm_bindgen::to_value(&result).map_err(Into::into)
+    }
+
+    pub fn clear_trajectory(&mut self) {}
+
+    pub fn set_tile_url_template(&mut self, template: String) {
+        self.state.borrow_mut().set_tile_url_template(template);
+    }
+
+    pub fn destroy(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.pending_tiles.clear();
+        state.high_priority_queue.clear();
+        state.medium_priority_queue.clear();
+        state.low_priority_queue.clear();
+        state.in_flight_requests = 0;
+        state.tile_cache.clear();
+        state.dragging = None;
+    }
+}
+
 #[wasm_bindgen]
 impl MapEngine {
     pub fn resize(&mut self, width: u32, height: u32, dpr: f32) {
@@ -1614,6 +3039,24 @@ impl MapEngine {
         let state = self.state.borrow();
         let projected = state.project_lon_lat_to_screen(lon, lat);
         serde_wasm_bindgen::to_value(&projected).map_err(Into::into)
+    }
+
+    pub fn get_view(&self) -> Result<JsValue, JsValue> {
+        let state = self.state.borrow();
+        let view = ViewState {
+            lon: state.center_lon,
+            lat: state.center_lat,
+            zoom: state.zoom,
+        };
+        serde_wasm_bindgen::to_value(&view).map_err(Into::into)
+    }
+
+    pub fn get_engine_kind(&self) -> String {
+        "raster".to_string()
+    }
+
+    pub fn get_render_backend(&self) -> String {
+        "canvas2d".to_string()
     }
 
     pub fn remove_recent_markers(&mut self, count: u32) {

@@ -2,9 +2,11 @@
 
 import type {
   CsvLoadResult,
+  EngineKind,
   MarkerHover,
   PlacedMarker,
   ProjectedPoint,
+  ViewState,
   WorkerInMessage,
   WorkerOutMessage
 } from "../lib/map-protocol";
@@ -23,18 +25,22 @@ type WasmMapEngine = {
   remove_marker_lon_lat(lon: number, lat: number): void;
   hit_test_marker(x: number, y: number): MarkerHover | null;
   project_lon_lat(lon: number, lat: number): ProjectedPoint | null;
+  get_view(): ViewState | null;
   remove_recent_markers(count: number): void;
   frame(nowMs: number): void;
   load_trajectory_csv(bytes: Uint8Array): CsvLoadResult;
   load_marker_csv(bytes: Uint8Array): CsvLoadResult;
   clear_trajectory(): void;
   set_tile_url_template(template: string): void;
+  get_engine_kind?(): EngineKind;
+  get_render_backend?(): "webgl2" | "webgpu" | "webgpu-fallback-webgl2" | "canvas2d";
   destroy(): void;
 };
 
 type WasmModule = {
   default: (input?: unknown) => Promise<unknown>;
   init_engine(canvasOrOffscreen: OffscreenCanvas, config: unknown): WasmMapEngine;
+  init_vector_engine?: (canvasOrOffscreen: OffscreenCanvas, config: unknown) => WasmMapEngine;
 };
 
 const workerContext = self as unknown as DedicatedWorkerGlobalScope;
@@ -43,6 +49,7 @@ const wasmBinaryUrl = new URL("../wasm/pkg/map_engine_wasm_bg.wasm", import.meta
 let wasmModulePromise: Promise<WasmModule> | null = null;
 let engine: WasmMapEngine | null = null;
 let appOrigin: string | null = null;
+let activeEngineKind: EngineKind = "raster";
 
 function postMessageToMain(message: WorkerOutMessage): void {
   workerContext.postMessage(message);
@@ -97,12 +104,21 @@ async function loadWasmModule(): Promise<WasmModule> {
 async function handleMessage(message: WorkerInMessage): Promise<void> {
   if (message.type === "INIT") {
     appOrigin = message.payload.origin;
+    activeEngineKind = message.payload.config.engineKind;
     postMessageToMain({ type: "STATUS", payload: { phase: "loading" } });
     const module = await loadWasmModule();
-    engine = module.init_engine(message.payload.canvas, message.payload.config);
+    engine =
+      message.payload.config.engineKind === "vector" && typeof module.init_vector_engine === "function"
+        ? module.init_vector_engine(message.payload.canvas, message.payload.config)
+        : module.init_engine(message.payload.canvas, message.payload.config);
     engine.resize(message.payload.width, message.payload.height, message.payload.dpr);
     engine.set_view(0, 20, 2);
-    postMessageToMain({ type: "READY", payload: { mode: "worker" } });
+    const reportedEngineKind = engine.get_engine_kind?.() ?? activeEngineKind;
+    const backend = engine.get_render_backend?.() ?? (reportedEngineKind === "vector" ? "webgl2" : "canvas2d");
+    postMessageToMain({
+      type: "READY",
+      payload: { mode: "worker", engineKind: reportedEngineKind, backend }
+    });
     return;
   }
 
@@ -137,6 +153,15 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
         }
       });
     }
+    if (message.type === "GET_VIEW") {
+      postMessageToMain({
+        type: "VIEW_STATE",
+        payload: {
+          requestId: message.payload.requestId,
+          view: null
+        }
+      });
+    }
     return;
   }
 
@@ -166,7 +191,20 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
   }
 
   if (message.type === "SET_VIEW") {
+    // Track view on the engine side; UI can request it back before engine restarts.
     engine.set_view(message.payload.lon, message.payload.lat, message.payload.zoom);
+    return;
+  }
+
+  if (message.type === "GET_VIEW") {
+    const view = engine.get_view?.() ?? null;
+    postMessageToMain({
+      type: "VIEW_STATE",
+      payload: {
+        requestId: message.payload.requestId,
+        view
+      }
+    });
     return;
   }
 

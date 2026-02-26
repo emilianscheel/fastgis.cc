@@ -1,6 +1,6 @@
 "use client";
 
-import { Crop, MapPin, Minus, Plus, Ruler, ZoomIn, ZoomOut } from "lucide-react";
+import { Crop, Image as ImageIcon, Layers3, MapPin, Minus, Plus, Ruler, ZoomIn, ZoomOut } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -15,6 +15,8 @@ import {
 export type MapStyleOption = {
   id: string;
   label: string;
+  engineKind: "raster" | "vector";
+  typeHintLabel?: string;
 };
 
 type MapToolbarProps = {
@@ -69,7 +71,17 @@ export function MapToolbar({
                   <MenubarRadioGroup value={mapStyleId} onValueChange={onMapStyleChange}>
                     {mapStyles.map((style) => (
                       <MenubarRadioItem key={style.id} value={style.id} className="rounded-none">
-                        {style.label}
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate">{style.label}</span>
+                          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                            {style.engineKind === "vector" ? (
+                              <Layers3 className="h-3.5 w-3.5" aria-hidden="true" />
+                            ) : (
+                              <ImageIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                            )}
+                            <span>{style.typeHintLabel ?? (style.engineKind === "vector" ? "Vector" : "Raster")}</span>
+                          </span>
+                        </div>
                       </MenubarRadioItem>
                     ))}
                   </MenubarRadioGroup>
