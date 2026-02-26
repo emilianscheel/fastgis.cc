@@ -1639,11 +1639,10 @@ impl MapEngine {
         let loaded_bounds = trajectory_bounds(&parsed.points);
         {
             let mut state = self.state.borrow_mut();
-            let existing_bounds = state.trajectories_bounds();
             if !parsed.points.is_empty() {
                 state.trajectories.push(parsed.points);
             }
-            if let Some(bounds) = EngineState::merge_bounds(existing_bounds, loaded_bounds) {
+            if let Some(bounds) = state.trajectories_bounds() {
                 state.fit_to_bounds(bounds);
             }
         }
@@ -1668,11 +1667,10 @@ impl MapEngine {
 
         {
             let mut state = self.state.borrow_mut();
-            let existing_bounds = state.location_markers_bounds();
             if !points.is_empty() {
                 state.append_marker_points(points);
             }
-            if let Some(bounds) = EngineState::merge_bounds(existing_bounds, loaded_bounds) {
+            if let Some(bounds) = state.location_markers_bounds() {
                 state.fit_to_bounds(bounds);
             }
         }
