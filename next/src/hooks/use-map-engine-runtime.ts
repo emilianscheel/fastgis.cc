@@ -46,6 +46,8 @@ type MainThreadEngine = {
 type RuntimeMode = "none" | "worker" | "main";
 export type RuntimeStatus = "loading" | "ready" | "error";
 type PointerMessageType = "POINTER_DOWN" | "POINTER_MOVE" | "POINTER_UP";
+const VECTOR_OVERZOOM_EXTRA_LEVELS = 6;
+const VECTOR_RENDER_MAX_ZOOM_CAP = 24;
 
 type BaseMapConfig = {
   minZoom: number;
@@ -168,11 +170,16 @@ export function useMapEngineRuntime({
         stylePreset: style.vectorSource.stylePreset,
         layerNames: tileJson.layerNames
       };
+      const minZoom = Math.max(baseMapConfig.minZoom, tileJson.minZoom);
+      const vectorRenderMaxZoom = Math.min(
+        VECTOR_RENDER_MAX_ZOOM_CAP,
+        Math.max(baseMapConfig.maxZoom, tileJson.maxZoom + VECTOR_OVERZOOM_EXTRA_LEVELS)
+      );
       const vectorConfig: VectorInitConfig = {
         ...baseMapConfig,
         engineKind: "vector",
-        minZoom: Math.max(baseMapConfig.minZoom, tileJson.minZoom),
-        maxZoom: Math.min(baseMapConfig.maxZoom, tileJson.maxZoom),
+        minZoom,
+        maxZoom: Math.max(minZoom, vectorRenderMaxZoom),
         vectorSource
       };
       return vectorConfig;

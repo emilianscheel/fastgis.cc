@@ -259,10 +259,10 @@ export class VectorMapEngine {
         wasm.vectormapengine_destroy(this.__wbg_ptr);
     }
     /**
-     * @param {number} _now_ms
+     * @param {number} now_ms
      */
-    frame(_now_ms) {
-        wasm.vectormapengine_frame(this.__wbg_ptr, _now_ms);
+    frame(now_ms) {
+        wasm.vectormapengine_frame(this.__wbg_ptr, now_ms);
     }
     /**
      * @returns {string}

@@ -37,7 +37,7 @@ export class VectorMapEngine {
     add_marker_lon_lat(_lon: number, _lat: number): void;
     clear_trajectory(): void;
     destroy(): void;
-    frame(_now_ms: number): void;
+    frame(now_ms: number): void;
     get_engine_kind(): string;
     get_render_backend(): string;
     get_view(): any;

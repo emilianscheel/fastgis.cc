@@ -21,6 +21,7 @@ use web_sys::{
 static PANIC_HOOK: Once = Once::new();
 const WHEEL_ZOOM_SENSITIVITY: f64 = 1.0 / 1000.0;
 const TILE_PREFETCH_MARGIN: i32 = 1;
+const VECTOR_PREFETCH_OUTER_MARGIN: i32 = 2;
 const TILE_DRAW_OVERLAP_PX: f64 = 1.0;
 const MAX_IN_FLIGHT_REQUESTS: usize = 8;
 const VOID_COLOR_BLEND_ALPHA: f64 = 0.25;
@@ -1969,8 +1970,28 @@ fn decode_mvt_tile_scene(bytes: &[u8]) -> Result<VectorTileScene, String> {
 #[derive(Clone)]
 struct CachedVectorTile {
     scene: VectorTileScene,
-    byte_len: usize,
     last_used: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VectorRequestCandidate {
+    key: TileKey,
+    score: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VectorLevelDrawParams {
+    z: u8,
+    tile_size_f: f64,
+    tiles_per_axis: u32,
+    display_scale: f64,
+    wrapped_top_left_x: f64,
+    top_left_world_y: f64,
+    tile_display_size: f64,
+    min_tx: i64,
+    max_tx: i64,
+    min_ty: i64,
+    max_ty: i64,
 }
 
 struct VectorEngineState {
@@ -1988,6 +2009,8 @@ struct VectorEngineState {
     zoom: f64,
     center_lon: f64,
     center_lat: f64,
+    view_animation: Option<ViewAnimation>,
+    last_frame_now_ms: f64,
     dragging: Option<DragState>,
     cache_tick: u64,
     cache_limit: usize,
@@ -2000,15 +2023,121 @@ struct VectorEngineState {
     max_in_flight_requests: usize,
     source_max_zoom: u8,
     backend_kind: VectorBackendKind,
+    last_zoom_direction: i8,
 }
 
 impl VectorEngineState {
+    fn zoom_scale(zoom: f64) -> f64 {
+        2_f64.powf(zoom)
+    }
+
     fn zoom_scale_for_delta(render_zoom: u8, zoom: f64) -> f64 {
         2.0_f64.powf(zoom - f64::from(render_zoom))
     }
 
     fn zoom_clamp_f64(&self, zoom: f64) -> f64 {
         zoom.clamp(f64::from(self.min_zoom), f64::from(self.max_zoom))
+    }
+
+    fn current_render_zoom(&self) -> u8 {
+        self.zoom
+            .round()
+            .clamp(f64::from(self.min_zoom), f64::from(self.max_zoom)) as u8
+    }
+
+    fn current_fetch_zoom(&self) -> u8 {
+        self.current_render_zoom().min(self.source_max_zoom)
+    }
+
+    fn relevant_fetch_zoom_bounds(&self) -> (u8, u8) {
+        let fetch_zoom = self.current_fetch_zoom();
+        (
+            fetch_zoom.saturating_sub(1),
+            fetch_zoom.saturating_add(1).min(self.source_max_zoom),
+        )
+    }
+
+    fn pop_latest_relevant_request(
+        queue: &mut VecDeque<TileKey>,
+        pending_tiles: &mut HashSet<TileKey>,
+        min_relevant_zoom: u8,
+        max_relevant_zoom: u8,
+    ) -> Option<TileKey> {
+        while let Some(key) = queue.pop_back() {
+            if key.z >= min_relevant_zoom && key.z <= max_relevant_zoom {
+                return Some(key);
+            }
+            pending_tiles.remove(&key);
+        }
+
+        None
+    }
+
+    fn cancel_view_animation(&mut self) {
+        self.view_animation = None;
+    }
+
+    fn interpolate_lon_shortest(start_lon: f64, target_lon: f64, t: f64) -> f64 {
+        let wrapped_delta = (target_lon - start_lon + 540.0).rem_euclid(360.0) - 180.0;
+        normalize_lon(start_lon + wrapped_delta * t)
+    }
+
+    fn start_view_animation(&mut self, target_lon: f64, target_lat: f64, target_zoom: f64) {
+        let target_lon = normalize_lon(target_lon);
+        let target_lat = clamp_lat(target_lat);
+        let target_zoom = self.zoom_clamp_f64(target_zoom);
+
+        let lon_delta = (target_lon - self.center_lon + 540.0).rem_euclid(360.0) - 180.0;
+        if lon_delta.abs() < 1e-9
+            && (target_lat - self.center_lat).abs() < 1e-9
+            && (target_zoom - self.zoom).abs() < 1e-9
+        {
+            self.cancel_view_animation();
+            self.center_lon = target_lon;
+            self.center_lat = target_lat;
+            self.zoom = target_zoom;
+            return;
+        }
+
+        self.view_animation = Some(ViewAnimation {
+            start_lon: self.center_lon,
+            start_lat: self.center_lat,
+            start_zoom: self.zoom,
+            target_lon,
+            target_lat,
+            target_zoom,
+            start_ms: self.last_frame_now_ms,
+            duration_ms: VIEW_ANIMATION_DURATION_MS,
+        });
+    }
+
+    fn update_view_animation(&mut self, now_ms: f64) {
+        let Some(animation) = self.view_animation else {
+            return;
+        };
+
+        let duration_ms = animation.duration_ms.max(1.0);
+        let progress = ((now_ms - animation.start_ms) / duration_ms).clamp(0.0, 1.0);
+        let eased_progress = 1.0 - (1.0 - progress).powi(3);
+
+        self.center_lon = Self::interpolate_lon_shortest(
+            animation.start_lon,
+            animation.target_lon,
+            eased_progress,
+        );
+        self.center_lat = clamp_lat(
+            animation.start_lat + (animation.target_lat - animation.start_lat) * eased_progress,
+        );
+        self.zoom = self.zoom_clamp_f64(
+            animation.start_zoom + (animation.target_zoom - animation.start_zoom) * eased_progress,
+        );
+
+        if progress >= 1.0 {
+            self.view_animation = None;
+            self.center_lon = normalize_lon(animation.target_lon);
+            self.center_lat = clamp_lat(animation.target_lat);
+            self.zoom = self.zoom_clamp_f64(animation.target_zoom);
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32, dpr: f32) {
@@ -2025,6 +2154,7 @@ impl VectorEngineState {
     }
 
     fn set_view(&mut self, lon: f64, lat: f32, zoom: f32) {
+        self.cancel_view_animation();
         self.center_lon = normalize_lon(lon);
         self.center_lat = clamp_lat(f64::from(lat));
         self.zoom = self.zoom_clamp_f64(f64::from(zoom));
@@ -2042,6 +2172,7 @@ impl VectorEngineState {
             return;
         }
 
+        self.cancel_view_animation();
         self.tile_url_template = template;
         self.pending_tiles.clear();
         self.high_priority_queue.clear();
@@ -2070,20 +2201,119 @@ impl VectorEngineState {
         }
     }
 
-    fn dequeue_next_request(&mut self) -> Option<TileKey> {
-        self.high_priority_queue
-            .pop_front()
-            .or_else(|| self.medium_priority_queue.pop_front())
-            .or_else(|| self.low_priority_queue.pop_front())
+    fn enqueue_candidates_sorted(
+        &mut self,
+        mut candidates: Vec<VectorRequestCandidate>,
+        priority: RequestPriority,
+    ) {
+        candidates.sort_by(|a, b| a.score.total_cmp(&b.score));
+        for candidate in candidates.into_iter().rev() {
+            self.enqueue_tile_request(candidate.key, priority);
+        }
     }
 
-    fn insert_tile_scene(&mut self, key: TileKey, scene: VectorTileScene, byte_len: usize) {
+    fn queue_zoom_warmup_tiles(&mut self, base_fetch_zoom: u8) {
+        if self.last_zoom_direction == 0 || self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+
+        // Only warm adjacent zoom levels while the user is actively between rounded levels.
+        if (self.zoom - self.zoom.round()).abs() < 0.08 {
+            return;
+        }
+
+        let target_zoom = if self.last_zoom_direction > 0 {
+            if base_fetch_zoom >= self.source_max_zoom {
+                return;
+            }
+            base_fetch_zoom + 1
+        } else {
+            if base_fetch_zoom <= self.min_zoom {
+                return;
+            }
+            base_fetch_zoom - 1
+        };
+
+        let tile_size_f = f64::from(self.tile_size);
+        let display_scale = Self::zoom_scale_for_delta(target_zoom, self.zoom);
+        if display_scale <= 0.0 {
+            return;
+        }
+
+        let (center_world_x, center_world_y) =
+            lon_lat_to_world(self.center_lon, self.center_lat, target_zoom, self.tile_size);
+        let top_left_world_x = center_world_x - (self.width * 0.5) / display_scale;
+        let top_left_world_y = center_world_y - (self.height * 0.5) / display_scale;
+        let viewport_world_w = self.width / display_scale;
+        let viewport_world_h = self.height / display_scale;
+        let tiles_per_axis = 1u32 << target_zoom;
+
+        let min_tx = (top_left_world_x / tile_size_f).floor() as i64;
+        let max_tx = ((top_left_world_x + viewport_world_w) / tile_size_f).ceil() as i64;
+        let min_ty = (top_left_world_y / tile_size_f).floor() as i64;
+        let max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64;
+
+        let mut candidates = Vec::new();
+        for ty in min_ty..=max_ty {
+            if ty < 0 || ty >= i64::from(tiles_per_axis) {
+                continue;
+            }
+
+            for tx in min_tx..=max_tx {
+                let wrapped_tx = tx.rem_euclid(i64::from(tiles_per_axis)) as u32;
+                let tile_center_x = (tx as f64 + 0.5) * tile_size_f;
+                let tile_center_y = (ty as f64 + 0.5) * tile_size_f;
+                let dx = tile_center_x - center_world_x;
+                let dy = tile_center_y - center_world_y;
+                candidates.push(VectorRequestCandidate {
+                    key: TileKey {
+                        z: target_zoom,
+                        x: wrapped_tx,
+                        y: ty as u32,
+                    },
+                    score: dx * dx + dy * dy,
+                });
+            }
+        }
+
+        self.enqueue_candidates_sorted(candidates, RequestPriority::Low);
+    }
+
+    fn dequeue_next_request(&mut self) -> Option<TileKey> {
+        let (min_relevant_zoom, max_relevant_zoom) = self.relevant_fetch_zoom_bounds();
+
+        if let Some(key) = Self::pop_latest_relevant_request(
+            &mut self.high_priority_queue,
+            &mut self.pending_tiles,
+            min_relevant_zoom,
+            max_relevant_zoom,
+        ) {
+            return Some(key);
+        }
+
+        if let Some(key) = Self::pop_latest_relevant_request(
+            &mut self.medium_priority_queue,
+            &mut self.pending_tiles,
+            min_relevant_zoom,
+            max_relevant_zoom,
+        ) {
+            return Some(key);
+        }
+
+        Self::pop_latest_relevant_request(
+            &mut self.low_priority_queue,
+            &mut self.pending_tiles,
+            min_relevant_zoom,
+            max_relevant_zoom,
+        )
+    }
+
+    fn insert_tile_scene(&mut self, key: TileKey, scene: VectorTileScene) {
         self.cache_tick = self.cache_tick.saturating_add(1);
         self.tile_cache.insert(
             key,
             CachedVectorTile {
                 scene,
-                byte_len,
                 last_used: self.cache_tick,
             },
         );
@@ -2176,6 +2406,58 @@ impl VectorEngineState {
         }
     }
 
+    fn draw_scene_canvas2d(
+        ctx: &RenderContext,
+        scene: &VectorTileScene,
+        tile_screen_x: f64,
+        tile_screen_y: f64,
+        tile_display_size: f64,
+        display_scale: f64,
+    ) {
+        for ring in &scene.water_polygons {
+            if ring.len() < 3 {
+                continue;
+            }
+            ctx.set_fill_style_str("#b3dbf2");
+            ctx.begin_path();
+            let first = ring[0];
+            ctx.move_to(
+                tile_screen_x + f64::from(first[0]) * tile_display_size,
+                tile_screen_y + f64::from(first[1]) * tile_display_size,
+            );
+            for point in ring.iter().skip(1) {
+                ctx.line_to(
+                    tile_screen_x + f64::from(point[0]) * tile_display_size,
+                    tile_screen_y + f64::from(point[1]) * tile_display_size,
+                );
+            }
+            ctx.fill();
+        }
+
+        if !scene.transportation_lines.is_empty() {
+            ctx.set_stroke_style_str("#ddd6c9");
+            ctx.set_line_width((1.0 + display_scale * 0.15).clamp(1.0, 2.5));
+            for path in &scene.transportation_lines {
+                if path.len() < 2 {
+                    continue;
+                }
+                ctx.begin_path();
+                let first = path[0];
+                ctx.move_to(
+                    tile_screen_x + f64::from(first[0]) * tile_display_size,
+                    tile_screen_y + f64::from(first[1]) * tile_display_size,
+                );
+                for point in path.iter().skip(1) {
+                    ctx.line_to(
+                        tile_screen_x + f64::from(point[0]) * tile_display_size,
+                        tile_screen_y + f64::from(point[1]) * tile_display_size,
+                    );
+                }
+                ctx.stroke();
+            }
+        }
+    }
+
     fn project_lon_lat_to_screen(&self, lon: f64, lat: f64) -> Option<ProjectedPoint> {
         if self.width <= 0.0 || self.height <= 0.0 {
             return None;
@@ -2194,11 +2476,214 @@ impl VectorEngineState {
         })
     }
 
+    fn zoom_to_box_screen_rect(&mut self, start_x: f64, start_y: f64, end_x: f64, end_y: f64) {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+
+        let left = start_x.min(end_x).clamp(0.0, self.width);
+        let right = start_x.max(end_x).clamp(0.0, self.width);
+        let top = start_y.min(end_y).clamp(0.0, self.height);
+        let bottom = start_y.max(end_y).clamp(0.0, self.height);
+
+        let selection_width = right - left;
+        let selection_height = bottom - top;
+        if selection_width < 1.0 || selection_height < 1.0 {
+            return;
+        }
+
+        let current_display_scale = Self::zoom_scale(self.zoom).max(1e-9);
+        let (center_world0_x, center_world0_y) =
+            lon_lat_to_world(self.center_lon, self.center_lat, 0, self.tile_size);
+        let left_world0 = center_world0_x + (left - self.width * 0.5) / current_display_scale;
+        let right_world0 = center_world0_x + (right - self.width * 0.5) / current_display_scale;
+        let top_world0 = center_world0_y + (top - self.height * 0.5) / current_display_scale;
+        let bottom_world0 = center_world0_y + (bottom - self.height * 0.5) / current_display_scale;
+
+        let min_world0_x = left_world0.min(right_world0);
+        let max_world0_x = left_world0.max(right_world0);
+        let min_world0_y = top_world0.min(bottom_world0);
+        let max_world0_y = top_world0.max(bottom_world0);
+        let world_width = (max_world0_x - min_world0_x).max(1e-12);
+        let world_height = (max_world0_y - min_world0_y).max(1e-12);
+        let safe_fit_padding = BOX_ZOOM_FIT_PADDING.clamp(0.05, 1.0);
+
+        let target_display_scale =
+            ((self.width / world_width).min(self.height / world_height) * safe_fit_padding)
+                .max(1e-9);
+        let target_zoom = self.zoom_clamp_f64(target_display_scale.log2());
+        let focus_world0_x = (min_world0_x + max_world0_x) * 0.5;
+        let focus_world0_y = (min_world0_y + max_world0_y) * 0.5;
+        let (target_lon, target_lat) =
+            world_to_lon_lat(focus_world0_x, focus_world0_y, 0, self.tile_size);
+
+        self.start_view_animation(target_lon, target_lat, target_zoom);
+    }
+
+    fn level_draw_params(&self, z: u8, margin_tiles: i64) -> Option<VectorLevelDrawParams> {
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return None;
+        }
+
+        let tile_size_f = f64::from(self.tile_size);
+        let display_scale = Self::zoom_scale_for_delta(z, self.zoom);
+        if display_scale <= 0.0 {
+            return None;
+        }
+
+        let (center_world_x, center_world_y) =
+            lon_lat_to_world(self.center_lon, self.center_lat, z, self.tile_size);
+        let top_left_world_x = center_world_x - (self.width * 0.5) / display_scale;
+        let top_left_world_y = center_world_y - (self.height * 0.5) / display_scale;
+        let tiles_per_axis = 1u32 << z;
+        let world_span = tile_size_f * f64::from(tiles_per_axis);
+        let viewport_world_w = self.width / display_scale;
+        let viewport_world_h = self.height / display_scale;
+
+        Some(VectorLevelDrawParams {
+            z,
+            tile_size_f,
+            tiles_per_axis,
+            display_scale,
+            wrapped_top_left_x: top_left_world_x.rem_euclid(world_span),
+            top_left_world_y,
+            tile_display_size: tile_size_f * display_scale,
+            min_tx: (top_left_world_x / tile_size_f).floor() as i64 - margin_tiles,
+            max_tx: ((top_left_world_x + viewport_world_w) / tile_size_f).ceil() as i64
+                + margin_tiles,
+            min_ty: (top_left_world_y / tile_size_f).floor() as i64 - margin_tiles,
+            max_ty: ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64
+                + margin_tiles,
+        })
+    }
+
+    fn has_pending_tiles_for_zoom(&self, z: u8) -> bool {
+        self.pending_tiles.iter().any(|key| key.z == z)
+    }
+
+    fn fallback_zoom_for_frame(&self, target_fetch_zoom: u8) -> Option<u8> {
+        if self.last_zoom_direction == 0 {
+            return None;
+        }
+        if (self.zoom - self.zoom.round()).abs() < 0.05 && !self.has_pending_tiles_for_zoom(target_fetch_zoom) {
+            return None;
+        }
+
+        if self.last_zoom_direction > 0 {
+            (target_fetch_zoom > self.min_zoom).then_some(target_fetch_zoom - 1)
+        } else {
+            (target_fetch_zoom < self.source_max_zoom).then_some(target_fetch_zoom + 1)
+        }
+    }
+
+    fn draw_cached_level_canvas2d(&mut self, ctx: &RenderContext, z: u8) {
+        let Some(params) = self.level_draw_params(z, 1) else {
+            return;
+        };
+        if params.tile_display_size <= 0.0 {
+            return;
+        }
+
+        for ty in params.min_ty..=params.max_ty {
+            if ty < 0 || ty >= i64::from(params.tiles_per_axis) {
+                continue;
+            }
+
+            for tx in params.min_tx..=params.max_tx {
+                let wrapped_tx = tx.rem_euclid(i64::from(params.tiles_per_axis)) as u32;
+                let key = TileKey { z: params.z, x: wrapped_tx, y: ty as u32 };
+
+                let tile_world_x = (tx as f64) * params.tile_size_f;
+                let screen_x = (tile_world_x - params.wrapped_top_left_x) * params.display_scale;
+                let screen_y =
+                    ((ty as f64) * params.tile_size_f - params.top_left_world_y) * params.display_scale;
+
+                if screen_x > self.width + params.tile_display_size
+                    || screen_y > self.height + params.tile_display_size
+                    || screen_x + params.tile_display_size < -params.tile_display_size
+                    || screen_y + params.tile_display_size < -params.tile_display_size
+                {
+                    continue;
+                }
+
+                if let Some(tile) = self.tile_cache.get_mut(&key) {
+                    self.cache_tick = self.cache_tick.saturating_add(1);
+                    tile.last_used = self.cache_tick;
+                    Self::draw_scene_canvas2d(
+                        ctx,
+                        &tile.scene,
+                        screen_x,
+                        screen_y,
+                        params.tile_display_size,
+                        params.display_scale,
+                    );
+                }
+            }
+        }
+    }
+
+    fn append_cached_level_geometry_webgl(
+        &mut self,
+        z: u8,
+        pixel_width: f64,
+        pixel_height: f64,
+        water_triangles_ndc: &mut Vec<f32>,
+        transportation_segments_ndc: &mut Vec<f32>,
+    ) {
+        let Some(params) = self.level_draw_params(z, 1) else {
+            return;
+        };
+        if params.tile_display_size <= 0.0 {
+            return;
+        }
+
+        for ty in params.min_ty..=params.max_ty {
+            if ty < 0 || ty >= i64::from(params.tiles_per_axis) {
+                continue;
+            }
+
+            for tx in params.min_tx..=params.max_tx {
+                let wrapped_tx = tx.rem_euclid(i64::from(params.tiles_per_axis)) as u32;
+                let key = TileKey { z: params.z, x: wrapped_tx, y: ty as u32 };
+
+                let tile_world_x = (tx as f64) * params.tile_size_f;
+                let screen_x = (tile_world_x - params.wrapped_top_left_x) * params.display_scale;
+                let screen_y =
+                    ((ty as f64) * params.tile_size_f - params.top_left_world_y) * params.display_scale;
+
+                if screen_x > self.width + params.tile_display_size
+                    || screen_y > self.height + params.tile_display_size
+                    || screen_x + params.tile_display_size < -params.tile_display_size
+                    || screen_y + params.tile_display_size < -params.tile_display_size
+                {
+                    continue;
+                }
+
+                let mut tile_scene_for_draw: Option<VectorTileScene> = None;
+                if let Some(tile) = self.tile_cache.get_mut(&key) {
+                    self.cache_tick = self.cache_tick.saturating_add(1);
+                    tile.last_used = self.cache_tick;
+                    tile_scene_for_draw = Some(tile.scene.clone());
+                }
+
+                if let Some(scene) = tile_scene_for_draw.as_ref() {
+                    self.append_tile_scene_geometry(
+                        scene,
+                        screen_x,
+                        screen_y,
+                        params.tile_display_size,
+                        pixel_width,
+                        pixel_height,
+                        water_triangles_ndc,
+                        transportation_segments_ndc,
+                    );
+                }
+            }
+        }
+    }
+
     fn queue_visible_tiles(&mut self) -> (u8, f64, f64, f64) {
-        let render_zoom = self
-            .zoom
-            .round()
-            .clamp(f64::from(self.min_zoom), f64::from(self.max_zoom)) as u8;
+        let render_zoom = self.current_render_zoom();
         let fetch_zoom = render_zoom.min(self.source_max_zoom);
         let tile_size_f = f64::from(self.tile_size);
         let display_scale = Self::zoom_scale_for_delta(fetch_zoom, self.zoom);
@@ -2211,45 +2696,77 @@ impl VectorEngineState {
         let viewport_world_w = self.width / display_scale;
         let viewport_world_h = self.height / display_scale;
 
-        let min_tx = (top_left_world_x / tile_size_f).floor() as i64 - i64::from(TILE_PREFETCH_MARGIN);
-        let max_tx = ((top_left_world_x + viewport_world_w) / tile_size_f).ceil() as i64
-            + i64::from(TILE_PREFETCH_MARGIN);
-        let min_ty = (top_left_world_y / tile_size_f).floor() as i64 - i64::from(TILE_PREFETCH_MARGIN);
-        let max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64
-            + i64::from(TILE_PREFETCH_MARGIN);
+        let visible_min_tx = (top_left_world_x / tile_size_f).floor() as i64;
+        let visible_max_tx = ((top_left_world_x + viewport_world_w) / tile_size_f).ceil() as i64;
+        let visible_min_ty = (top_left_world_y / tile_size_f).floor() as i64;
+        let visible_max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64;
 
-        for ty in min_ty..=max_ty {
+        let outer_min_tx = visible_min_tx - i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
+        let outer_max_tx = visible_max_tx + i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
+        let outer_min_ty = visible_min_ty - i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
+        let outer_max_ty = visible_max_ty + i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
+
+        let immediate_min_tx = visible_min_tx - i64::from(TILE_PREFETCH_MARGIN);
+        let immediate_max_tx = visible_max_tx + i64::from(TILE_PREFETCH_MARGIN);
+        let immediate_min_ty = visible_min_ty - i64::from(TILE_PREFETCH_MARGIN);
+        let immediate_max_ty = visible_max_ty + i64::from(TILE_PREFETCH_MARGIN);
+
+        let mut high_candidates = Vec::new();
+        let mut medium_candidates = Vec::new();
+        let mut low_candidates = Vec::new();
+
+        for ty in outer_min_ty..=outer_max_ty {
             if ty < 0 || ty >= i64::from(tiles_per_axis) {
                 continue;
             }
 
-            for tx in min_tx..=max_tx {
+            for tx in outer_min_tx..=outer_max_tx {
                 let wrapped_tx = tx.rem_euclid(i64::from(tiles_per_axis)) as u32;
-                let key = TileKey {
-                    z: fetch_zoom,
-                    x: wrapped_tx,
-                    y: ty as u32,
+                let tile_center_x = (tx as f64 + 0.5) * tile_size_f;
+                let tile_center_y = (ty as f64 + 0.5) * tile_size_f;
+                let dx = tile_center_x - center_world_x;
+                let dy = tile_center_y - center_world_y;
+                let candidate = VectorRequestCandidate {
+                    key: TileKey {
+                        z: fetch_zoom,
+                        x: wrapped_tx,
+                        y: ty as u32,
+                    },
+                    score: dx * dx + dy * dy,
                 };
 
-                let is_visible = tx >= min_tx + i64::from(TILE_PREFETCH_MARGIN)
-                    && tx <= max_tx - i64::from(TILE_PREFETCH_MARGIN)
-                    && ty >= min_ty + i64::from(TILE_PREFETCH_MARGIN)
-                    && ty <= max_ty - i64::from(TILE_PREFETCH_MARGIN);
-                let priority = if is_visible {
-                    RequestPriority::High
+                let is_visible = tx >= visible_min_tx
+                    && tx <= visible_max_tx
+                    && ty >= visible_min_ty
+                    && ty <= visible_max_ty;
+                let is_immediate_ring = tx >= immediate_min_tx
+                    && tx <= immediate_max_tx
+                    && ty >= immediate_min_ty
+                    && ty <= immediate_max_ty;
+
+                if is_visible {
+                    high_candidates.push(candidate);
+                } else if is_immediate_ring {
+                    medium_candidates.push(candidate);
                 } else {
-                    RequestPriority::Medium
-                };
-                self.enqueue_tile_request(key, priority);
+                    low_candidates.push(candidate);
+                }
             }
         }
+
+        self.enqueue_candidates_sorted(low_candidates, RequestPriority::Low);
+        self.enqueue_candidates_sorted(medium_candidates, RequestPriority::Medium);
+        self.enqueue_candidates_sorted(high_candidates, RequestPriority::High);
+        self.queue_zoom_warmup_tiles(fetch_zoom);
 
         // Wrap top-left x into world span to keep screen placement stable for rendering.
         let wrapped_top_left_x = top_left_world_x.rem_euclid(world_span);
         (fetch_zoom, display_scale, wrapped_top_left_x, top_left_world_y)
     }
 
-    fn draw(&mut self) {
+    fn draw(&mut self, now_ms: f64) {
+        self.last_frame_now_ms = now_ms;
+        self.update_view_animation(now_ms);
         if self.gl.is_some() {
             self.draw_webgl();
         } else {
@@ -2271,6 +2788,9 @@ impl VectorEngineState {
         ctx.fill_rect(0.0, 0.0, self.width, self.height);
 
         let (fetch_zoom, display_scale, wrapped_top_left_x, top_left_world_y) = self.queue_visible_tiles();
+        if let Some(fallback_zoom) = self.fallback_zoom_for_frame(fetch_zoom) {
+            self.draw_cached_level_canvas2d(&ctx, fallback_zoom);
+        }
         let tile_size_f = f64::from(self.tile_size);
         let tile_display_size = tile_size_f * display_scale;
         if tile_display_size <= 0.0 {
@@ -2311,70 +2831,20 @@ impl VectorEngineState {
                     continue;
                 }
 
-                ctx.set_fill_style_str("#eceeea");
-                ctx.fill_rect(screen_x, screen_y, tile_display_size, tile_display_size);
-                ctx.set_fill_style_str("#f6f6f4");
-                ctx.fill_rect(
-                    screen_x + 1.0,
-                    screen_y + 1.0,
-                    (tile_display_size - 2.0).max(0.0),
-                    (tile_display_size - 2.0).max(0.0),
-                );
-
                 if let Some(tile) = self.tile_cache.get_mut(&key) {
                     self.cache_tick = self.cache_tick.saturating_add(1);
                     tile.last_used = self.cache_tick;
-
-                    for ring in &tile.scene.water_polygons {
-                        if ring.len() < 3 {
-                            continue;
-                        }
-                        ctx.set_fill_style_str("#b3dbf2");
-                        ctx.begin_path();
-                        let first = ring[0];
-                        ctx.move_to(
-                            screen_x + f64::from(first[0]) * tile_display_size,
-                            screen_y + f64::from(first[1]) * tile_display_size,
-                        );
-                        for point in ring.iter().skip(1) {
-                            ctx.line_to(
-                                screen_x + f64::from(point[0]) * tile_display_size,
-                                screen_y + f64::from(point[1]) * tile_display_size,
-                            );
-                        }
-                        ctx.fill();
-                    }
-
-                    if !tile.scene.transportation_lines.is_empty() {
-                        ctx.set_stroke_style_str("#626b76");
-                        ctx.set_line_width((1.0 + display_scale * 0.15).clamp(1.0, 2.5));
-                        for path in &tile.scene.transportation_lines {
-                            if path.len() < 2 {
-                                continue;
-                            }
-                            ctx.begin_path();
-                            let first = path[0];
-                            ctx.move_to(
-                                screen_x + f64::from(first[0]) * tile_display_size,
-                                screen_y + f64::from(first[1]) * tile_display_size,
-                            );
-                            for point in path.iter().skip(1) {
-                                ctx.line_to(
-                                    screen_x + f64::from(point[0]) * tile_display_size,
-                                    screen_y + f64::from(point[1]) * tile_display_size,
-                                );
-                            }
-                            ctx.stroke();
-                        }
-                    }
-                } else if self.pending_tiles.contains(&key) {
-                    ctx.set_fill_style_str("#f2f2ef");
-                    ctx.fill_rect(
-                        screen_x + 1.0,
-                        screen_y + 1.0,
-                        (tile_display_size - 2.0).max(0.0),
-                        (tile_display_size - 2.0).max(0.0),
+                    Self::draw_scene_canvas2d(
+                        &ctx,
+                        &tile.scene,
+                        screen_x,
+                        screen_y,
+                        tile_display_size,
+                        display_scale,
                     );
+                } else if self.pending_tiles.contains(&key) {
+                    ctx.set_fill_style_str("#f3f2ee");
+                    ctx.fill_rect(screen_x, screen_y, tile_display_size, tile_display_size);
                 }
             }
         }
@@ -2417,6 +2887,15 @@ impl VectorEngineState {
         let mut transportation_segments_ndc: Vec<f32> = Vec::new();
         let pixel_width_f = f64::from(pixel_width.max(1));
         let pixel_height_f = f64::from(pixel_height.max(1));
+        if let Some(fallback_zoom) = self.fallback_zoom_for_frame(fetch_zoom) {
+            self.append_cached_level_geometry_webgl(
+                fallback_zoom,
+                pixel_width_f,
+                pixel_height_f,
+                &mut water_triangles_ndc,
+                &mut transportation_segments_ndc,
+            );
+        }
 
         gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
 
@@ -2445,9 +2924,7 @@ impl VectorEngineState {
                     continue;
                 }
 
-                let mut border_color = (0.926_f32, 0.930_f32, 0.924_f32);
-                let mut fill_color = (0.948_f32, 0.949_f32, 0.944_f32);
-                let mut tile_loaded = false;
+                let mut placeholder_fill_color: Option<(f32, f32, f32)> = None;
                 let mut tile_scene_for_draw: Option<VectorTileScene> = None;
 
                 let x_px = (screen_x * self.dpr).round() as i32;
@@ -2456,20 +2933,11 @@ impl VectorEngineState {
                 let h_px = ((tile_display_size * self.dpr).round() as i32).max(1);
 
                 if let Some(tile) = self.tile_cache.get_mut(&key) {
-                    tile_loaded = true;
                     self.cache_tick = self.cache_tick.saturating_add(1);
                     tile.last_used = self.cache_tick;
-                    let size_mod = ((tile.byte_len as u32) % 89) as f32 / 89.0;
-                    fill_color = (
-                        0.946 - size_mod * 0.010,
-                        0.948 - size_mod * 0.010,
-                        0.943 - size_mod * 0.008,
-                    );
-                    border_color = (0.932, 0.936, 0.930);
                     tile_scene_for_draw = Some(tile.scene.clone());
                 } else if self.pending_tiles.contains(&key) {
-                    fill_color = (0.942, 0.943, 0.938);
-                    border_color = (0.922, 0.924, 0.918);
+                    placeholder_fill_color = Some((0.952, 0.950, 0.942));
                 }
 
                 if let Some(scene) = tile_scene_for_draw.as_ref() {
@@ -2485,19 +2953,9 @@ impl VectorEngineState {
                     );
                 }
 
-                gl.scissor(x_px, y_px, w_px, h_px);
-                gl.clear_color(border_color.0, border_color.1, border_color.2, 1.0);
-                gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-
-                if w_px > 2 && h_px > 2 {
-                    gl.scissor(x_px + 1, y_px + 1, w_px - 2, h_px - 2);
-                    gl.clear_color(fill_color.0, fill_color.1, fill_color.2, 1.0);
-                    gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
-                }
-
-                if tile_loaded && w_px > 4 && h_px > 4 {
-                    gl.scissor(x_px + 2, y_px + 2, w_px - 4, h_px - 4);
-                    gl.clear_color(0.962, 0.962, 0.958, 1.0);
+                if let Some((r, g, b)) = placeholder_fill_color {
+                    gl.scissor(x_px, y_px, w_px, h_px);
+                    gl.clear_color(r, g, b, 1.0);
                     gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
                 }
             }
@@ -2516,7 +2974,7 @@ impl VectorEngineState {
                 &gl,
                 WebGl2RenderingContext::LINES,
                 &transportation_segments_ndc,
-                [0.36, 0.39, 0.43, 1.0],
+                [0.867, 0.839, 0.788, 1.0],
             );
         }
     }
@@ -2549,7 +3007,7 @@ fn request_vector_tile(state: Rc<RefCell<VectorEngineState>>, key: TileKey, url:
             if is_current_source && is_relevant_zoom {
                 if let Ok(bytes) = result {
                     if let Ok(scene) = decode_mvt_tile_scene(&bytes) {
-                        state_mut.insert_tile_scene(key, scene, bytes.len());
+                        state_mut.insert_tile_scene(key, scene);
                     }
                 }
             }
@@ -2679,6 +3137,8 @@ pub fn init_vector_engine(
         zoom: 2.0_f64.clamp(f64::from(min_zoom), f64::from(max_zoom)),
         center_lon: 0.0,
         center_lat: 20.0,
+        view_animation: None,
+        last_frame_now_ms: 0.0,
         dragging: None,
         cache_tick: 0,
         cache_limit,
@@ -2691,6 +3151,7 @@ pub fn init_vector_engine(
         max_in_flight_requests: MAX_IN_FLIGHT_REQUESTS,
         source_max_zoom,
         backend_kind,
+        last_zoom_direction: 0,
     };
 
     Ok(VectorMapEngine {
@@ -2710,6 +3171,8 @@ impl VectorMapEngine {
         }
 
         let mut state = self.state.borrow_mut();
+        state.cancel_view_animation();
+        state.last_zoom_direction = 0;
         let render_zoom = state.zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
         let (world_x, world_y) =
             lon_lat_to_world(state.center_lon, state.center_lat, render_zoom, state.tile_size);
@@ -2749,6 +3212,7 @@ impl VectorMapEngine {
         }
 
         let mut state = self.state.borrow_mut();
+        state.cancel_view_animation();
         let old_zoom = state.zoom;
         let zoom_delta = -f64::from(delta_y) * WHEEL_ZOOM_SENSITIVITY;
         let new_zoom = state.zoom_clamp_f64(old_zoom + zoom_delta);
@@ -2780,55 +3244,24 @@ impl VectorMapEngine {
         state.zoom = new_zoom;
         state.center_lon = normalize_lon(center_lon);
         state.center_lat = clamp_lat(center_lat);
+        state.last_zoom_direction = if new_zoom > old_zoom { 1 } else { -1 };
     }
 
     pub fn set_view(&mut self, lon: f64, lat: f64, zoom: f32) {
-        self.state.borrow_mut().set_view(lon, lat as f32, zoom);
+        let mut state = self.state.borrow_mut();
+        state.last_zoom_direction = 0;
+        state.set_view(lon, lat as f32, zoom);
     }
 
     pub fn zoom_to_box(&mut self, start_x: f32, start_y: f32, end_x: f32, end_y: f32) {
         let mut state = self.state.borrow_mut();
-        let min_x = f64::from(start_x.min(end_x));
-        let max_x = f64::from(start_x.max(end_x));
-        let min_y = f64::from(start_y.min(end_y));
-        let max_y = f64::from(start_y.max(end_y));
-        let box_w = (max_x - min_x).abs();
-        let box_h = (max_y - min_y).abs();
-        if box_w < 4.0 || box_h < 4.0 || state.width <= 0.0 || state.height <= 0.0 {
-            return;
-        }
-
-        let render_zoom = state.zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
-        let display_scale = VectorEngineState::zoom_scale_for_delta(render_zoom, state.zoom);
-        let (center_world_x, center_world_y) =
-            lon_lat_to_world(state.center_lon, state.center_lat, render_zoom, state.tile_size);
-        let top_left_world_x = center_world_x - (state.width / 2.0) / display_scale;
-        let top_left_world_y = center_world_y - (state.height / 2.0) / display_scale;
-
-        let min_world_x = top_left_world_x + min_x / display_scale;
-        let max_world_x = top_left_world_x + max_x / display_scale;
-        let min_world_y = top_left_world_y + min_y / display_scale;
-        let max_world_y = top_left_world_y + max_y / display_scale;
-
-        let world_w = (max_world_x - min_world_x).abs().max(1e-9);
-        let world_h = (max_world_y - min_world_y).abs().max(1e-9);
-        let target_scale = ((state.width / world_w).min(state.height / world_h) * BOX_ZOOM_FIT_PADDING).max(1e-9);
-        let target_zoom = state.zoom_clamp_f64(f64::from(render_zoom) + target_scale.log2());
-        let target_render_zoom =
-            target_zoom.round().clamp(f64::from(state.min_zoom), f64::from(state.max_zoom)) as u8;
-        let mid_world_x = (min_world_x + max_world_x) * 0.5;
-        let mid_world_y = (min_world_y + max_world_y) * 0.5;
-        let (mid_lon, mid_lat) = world_to_lon_lat(mid_world_x, mid_world_y, render_zoom, state.tile_size);
-        let (target_lon, target_lat) = if target_render_zoom == render_zoom {
-            (mid_lon, mid_lat)
-        } else {
-            let (wx, wy) = lon_lat_to_world(mid_lon, mid_lat, target_render_zoom, state.tile_size);
-            world_to_lon_lat(wx, wy, target_render_zoom, state.tile_size)
-        };
-
-        state.zoom = target_zoom;
-        state.center_lon = normalize_lon(target_lon);
-        state.center_lat = clamp_lat(target_lat);
+        state.last_zoom_direction = 0;
+        state.zoom_to_box_screen_rect(
+            f64::from(start_x),
+            f64::from(start_y),
+            f64::from(end_x),
+            f64::from(end_y),
+        );
     }
 
     pub fn place_marker(&mut self, _x: f32, _y: f32) {}
@@ -2866,8 +3299,8 @@ impl VectorMapEngine {
 
     pub fn remove_recent_markers(&mut self, _count: u32) {}
 
-    pub fn frame(&mut self, _now_ms: f64) {
-        self.state.borrow_mut().draw();
+    pub fn frame(&mut self, now_ms: f64) {
+        self.state.borrow_mut().draw(now_ms);
         pump_vector_requests(self.state.clone());
     }
 
