@@ -66,7 +66,7 @@ export function MapToolbar({
           {isMounted ? (
             <Menubar className="h-9 rounded-none border-border/80 bg-background p-0">
               <MenubarMenu>
-                <MenubarTrigger className="h-9 rounded-none px-3 text-foreground">Style</MenubarTrigger>
+                <MenubarTrigger className="h-full rounded-none px-3 text-foreground">Style</MenubarTrigger>
                 <MenubarContent align="end" className="rounded-none">
                   <MenubarRadioGroup value={mapStyleId} onValueChange={onMapStyleChange}>
                     {mapStyles.map((style) => (
