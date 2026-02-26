@@ -1552,34 +1552,93 @@ struct VectorTileScene {
     transportation_lines: Vec<Vec<[f32; 2]>>,
 }
 
+#[derive(Clone, Default)]
+struct PreparedVectorTileGeometry {
+    // Tile-local normalized coordinates (0..1), flattened as x,y pairs.
+    water_triangles: Vec<f32>,
+    transportation_segments: Vec<f32>,
+}
+
 #[derive(Clone)]
 struct SimpleGlPainter {
     program: WebGlProgram,
-    vertex_buffer: WebGlBuffer,
     position_attrib: u32,
     color_uniform: WebGlUniformLocation,
+    tile_origin_uniform: WebGlUniformLocation,
+    tile_size_uniform: WebGlUniformLocation,
+    viewport_uniform: WebGlUniformLocation,
+    dpr_uniform: WebGlUniformLocation,
+}
+
+#[derive(Clone)]
+struct TileGlBuffers {
+    water_buffer: Option<WebGlBuffer>,
+    water_vertex_count: i32,
+    transportation_buffer: Option<WebGlBuffer>,
+    transportation_vertex_count: i32,
+}
+
+fn build_prepared_vector_tile_geometry(scene: &VectorTileScene) -> PreparedVectorTileGeometry {
+    let mut prepared = PreparedVectorTileGeometry::default();
+
+    for ring in &scene.water_polygons {
+        if ring.len() < 3 {
+            continue;
+        }
+
+        // Naive triangle fan triangulation. Cached once per tile to avoid repeating this
+        // work every frame during pan/zoom.
+        let first = ring[0];
+        for index in 1..(ring.len().saturating_sub(1)) {
+            let b = ring[index];
+            let c = ring[index + 1];
+            prepared
+                .water_triangles
+                .extend_from_slice(&[first[0], first[1], b[0], b[1], c[0], c[1]]);
+        }
+    }
+
+    for path in &scene.transportation_lines {
+        if path.len() < 2 {
+            continue;
+        }
+
+        for segment in path.windows(2) {
+            let start = segment[0];
+            let end = segment[1];
+            prepared.transportation_segments.extend_from_slice(&[
+                start[0],
+                start[1],
+                end[0],
+                end[1],
+            ]);
+        }
+    }
+
+    prepared
 }
 
 impl SimpleGlPainter {
-    fn draw_arrays(
+    fn draw_tile_buffer(
         &self,
         gl: &WebGl2RenderingContext,
         mode: u32,
-        vertices_ndc: &[f32],
+        buffer: &WebGlBuffer,
+        vertex_count: i32,
         color: [f32; 4],
+        tile_screen_x: f64,
+        tile_screen_y: f64,
+        tile_display_size: f64,
+        viewport_pixel_width: f64,
+        viewport_pixel_height: f64,
+        dpr: f64,
     ) {
-        if vertices_ndc.is_empty() {
+        if vertex_count <= 0 {
             return;
         }
 
         gl.use_program(Some(&self.program));
-        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&self.vertex_buffer));
-        let buffer = Float32Array::from(vertices_ndc);
-        gl.buffer_data_with_array_buffer_view(
-            WebGl2RenderingContext::ARRAY_BUFFER,
-            &buffer,
-            WebGl2RenderingContext::DYNAMIC_DRAW,
-        );
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(buffer));
         gl.enable_vertex_attrib_array(self.position_attrib);
         gl.vertex_attrib_pointer_with_i32(
             self.position_attrib,
@@ -1596,7 +1655,44 @@ impl SimpleGlPainter {
             color[2],
             color[3],
         );
-        gl.draw_arrays(mode, 0, (vertices_ndc.len() / 2) as i32);
+        gl.uniform2f(
+            Some(&self.tile_origin_uniform),
+            tile_screen_x as f32,
+            tile_screen_y as f32,
+        );
+        gl.uniform1f(Some(&self.tile_size_uniform), tile_display_size as f32);
+        gl.uniform2f(
+            Some(&self.viewport_uniform),
+            viewport_pixel_width as f32,
+            viewport_pixel_height as f32,
+        );
+        gl.uniform1f(Some(&self.dpr_uniform), dpr as f32);
+        gl.draw_arrays(mode, 0, vertex_count);
+    }
+}
+
+fn upload_static_gl_buffer(gl: &WebGl2RenderingContext, data: &[f32]) -> Option<WebGlBuffer> {
+    if data.is_empty() {
+        return None;
+    }
+
+    let buffer = gl.create_buffer()?;
+    gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
+    let js_array = Float32Array::from(data);
+    gl.buffer_data_with_array_buffer_view(
+        WebGl2RenderingContext::ARRAY_BUFFER,
+        &js_array,
+        WebGl2RenderingContext::STATIC_DRAW,
+    );
+    Some(buffer)
+}
+
+fn build_tile_gl_buffers(gl: &WebGl2RenderingContext, prepared: &PreparedVectorTileGeometry) -> TileGlBuffers {
+    TileGlBuffers {
+        water_vertex_count: (prepared.water_triangles.len() / 2) as i32,
+        water_buffer: upload_static_gl_buffer(gl, &prepared.water_triangles),
+        transportation_vertex_count: (prepared.transportation_segments.len() / 2) as i32,
+        transportation_buffer: upload_static_gl_buffer(gl, &prepared.transportation_segments),
     }
 }
 
@@ -1631,8 +1727,18 @@ fn create_simple_gl_painter(gl: &WebGl2RenderingContext) -> Result<SimpleGlPaint
         WebGl2RenderingContext::VERTEX_SHADER,
         r#"#version 300 es
 in vec2 a_pos;
+uniform vec2 u_tile_origin;
+uniform float u_tile_size;
+uniform vec2 u_viewport_px;
+uniform float u_dpr;
 void main() {
-  gl_Position = vec4(a_pos, 0.0, 1.0);
+  vec2 screen_css = u_tile_origin + a_pos * u_tile_size;
+  vec2 px = screen_css * u_dpr;
+  vec2 ndc = vec2(
+    (px.x / u_viewport_px.x) * 2.0 - 1.0,
+    1.0 - (px.y / u_viewport_px.y) * 2.0
+  );
+  gl_Position = vec4(ndc, 0.0, 1.0);
 }"#,
     )?;
     let fragment_shader = compile_gl_shader(
@@ -1674,16 +1780,27 @@ void main() {
     let color_uniform = gl
         .get_uniform_location(&program, "u_color")
         .ok_or_else(|| JsValue::from_str("WebGL uniform u_color not found"))?;
-
-    let vertex_buffer = gl
-        .create_buffer()
-        .ok_or_else(|| JsValue::from_str("Failed to create WebGL buffer"))?;
+    let tile_origin_uniform = gl
+        .get_uniform_location(&program, "u_tile_origin")
+        .ok_or_else(|| JsValue::from_str("WebGL uniform u_tile_origin not found"))?;
+    let tile_size_uniform = gl
+        .get_uniform_location(&program, "u_tile_size")
+        .ok_or_else(|| JsValue::from_str("WebGL uniform u_tile_size not found"))?;
+    let viewport_uniform = gl
+        .get_uniform_location(&program, "u_viewport_px")
+        .ok_or_else(|| JsValue::from_str("WebGL uniform u_viewport_px not found"))?;
+    let dpr_uniform = gl
+        .get_uniform_location(&program, "u_dpr")
+        .ok_or_else(|| JsValue::from_str("WebGL uniform u_dpr not found"))?;
 
     Ok(SimpleGlPainter {
         program,
-        vertex_buffer,
         position_attrib: position_attrib as u32,
         color_uniform,
+        tile_origin_uniform,
+        tile_size_uniform,
+        viewport_uniform,
+        dpr_uniform,
     })
 }
 
@@ -1970,6 +2087,8 @@ fn decode_mvt_tile_scene(bytes: &[u8]) -> Result<VectorTileScene, String> {
 #[derive(Clone)]
 struct CachedVectorTile {
     scene: VectorTileScene,
+    prepared_geometry: PreparedVectorTileGeometry,
+    gl_buffers: Option<TileGlBuffers>,
     last_used: u64,
 }
 
@@ -1992,6 +2111,14 @@ struct VectorLevelDrawParams {
     max_tx: i64,
     min_ty: i64,
     max_ty: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VectorGlTileDrawCommand {
+    key: TileKey,
+    screen_x: f64,
+    screen_y: f64,
+    tile_display_size: f64,
 }
 
 struct VectorEngineState {
@@ -2310,10 +2437,13 @@ impl VectorEngineState {
 
     fn insert_tile_scene(&mut self, key: TileKey, scene: VectorTileScene) {
         self.cache_tick = self.cache_tick.saturating_add(1);
+        let prepared_geometry = build_prepared_vector_tile_geometry(&scene);
         self.tile_cache.insert(
             key,
             CachedVectorTile {
                 scene,
+                prepared_geometry,
+                gl_buffers: None,
                 last_used: self.cache_tick,
             },
         );
@@ -2330,6 +2460,138 @@ impl VectorEngineState {
         }
     }
 
+    fn touch_cached_tile(&mut self, key: TileKey) -> bool {
+        if let Some(tile) = self.tile_cache.get_mut(&key) {
+            self.cache_tick = self.cache_tick.saturating_add(1);
+            tile.last_used = self.cache_tick;
+            return true;
+        }
+
+        false
+    }
+
+    fn touch_and_get_tile_gl_buffers(
+        &mut self,
+        gl: &WebGl2RenderingContext,
+        key: TileKey,
+    ) -> Option<TileGlBuffers> {
+        let next_tick = self.cache_tick.saturating_add(1);
+        self.cache_tick = next_tick;
+
+        let tile = self.tile_cache.get_mut(&key)?;
+        tile.last_used = next_tick;
+        if tile.gl_buffers.is_none() {
+            tile.gl_buffers = Some(build_tile_gl_buffers(gl, &tile.prepared_geometry));
+        }
+        tile.gl_buffers.clone()
+    }
+
+    fn collect_cached_level_gl_draw_commands(
+        &self,
+        z: u8,
+        margin_tiles: i64,
+        out: &mut Vec<VectorGlTileDrawCommand>,
+    ) {
+        let Some(params) = self.level_draw_params(z, margin_tiles) else {
+            return;
+        };
+        if params.tile_display_size <= 0.0 {
+            return;
+        }
+
+        for ty in params.min_ty..=params.max_ty {
+            if ty < 0 || ty >= i64::from(params.tiles_per_axis) {
+                continue;
+            }
+
+            for tx in params.min_tx..=params.max_tx {
+                let wrapped_tx = tx.rem_euclid(i64::from(params.tiles_per_axis)) as u32;
+                let key = TileKey {
+                    z: params.z,
+                    x: wrapped_tx,
+                    y: ty as u32,
+                };
+                if !self.tile_cache.contains_key(&key) {
+                    continue;
+                }
+
+                let tile_world_x = (tx as f64) * params.tile_size_f;
+                let screen_x = (tile_world_x - params.wrapped_top_left_x) * params.display_scale;
+                let screen_y =
+                    ((ty as f64) * params.tile_size_f - params.top_left_world_y) * params.display_scale;
+
+                if screen_x > self.width + params.tile_display_size
+                    || screen_y > self.height + params.tile_display_size
+                    || screen_x + params.tile_display_size < -params.tile_display_size
+                    || screen_y + params.tile_display_size < -params.tile_display_size
+                {
+                    continue;
+                }
+
+                out.push(VectorGlTileDrawCommand {
+                    key,
+                    screen_x,
+                    screen_y,
+                    tile_display_size: params.tile_display_size,
+                });
+            }
+        }
+    }
+
+    fn draw_cached_tile_webgl_layers(
+        &mut self,
+        gl: &WebGl2RenderingContext,
+        painter: &SimpleGlPainter,
+        cmd: VectorGlTileDrawCommand,
+        viewport_pixel_width: f64,
+        viewport_pixel_height: f64,
+        draw_water: bool,
+        draw_lines: bool,
+    ) {
+        let Some(buffers) = self.touch_and_get_tile_gl_buffers(gl, cmd.key) else {
+            return;
+        };
+
+        if draw_water {
+            if let (Some(buffer), count) = (buffers.water_buffer.as_ref(), buffers.water_vertex_count) {
+            painter.draw_tile_buffer(
+                gl,
+                WebGl2RenderingContext::TRIANGLES,
+                buffer,
+                count,
+                [0.70, 0.86, 0.95, 1.0],
+                cmd.screen_x,
+                cmd.screen_y,
+                cmd.tile_display_size,
+                viewport_pixel_width,
+                viewport_pixel_height,
+                self.dpr,
+            );
+        }
+        }
+
+        if draw_lines {
+            if let (Some(buffer), count) =
+                (buffers.transportation_buffer.as_ref(), buffers.transportation_vertex_count)
+            {
+            painter.draw_tile_buffer(
+                gl,
+                WebGl2RenderingContext::LINES,
+                buffer,
+                count,
+                [0.867, 0.839, 0.788, 1.0],
+                cmd.screen_x,
+                cmd.screen_y,
+                cmd.tile_display_size,
+                viewport_pixel_width,
+                viewport_pixel_height,
+                self.dpr,
+            );
+        }
+        }
+    }
+
+    #[allow(dead_code)]
     fn screen_px_to_ndc(&self, screen_x: f64, screen_y: f64, pixel_width: f64, pixel_height: f64) -> [f32; 2] {
         let px = screen_x * self.dpr;
         let py = screen_y * self.dpr;
@@ -2339,9 +2601,10 @@ impl VectorEngineState {
         ]
     }
 
-    fn append_tile_scene_geometry(
+    #[allow(dead_code)]
+    fn append_prepared_tile_geometry(
         &self,
-        scene: &VectorTileScene,
+        prepared: &PreparedVectorTileGeometry,
         tile_screen_x: f64,
         tile_screen_y: f64,
         tile_display_size: f64,
@@ -2354,55 +2617,26 @@ impl VectorEngineState {
             return;
         }
 
-        for ring in &scene.water_polygons {
-            if ring.len() < 3 {
-                continue;
-            }
-
-            let mut points_ndc: Vec<[f32; 2]> = Vec::with_capacity(ring.len());
-            for point in ring {
-                let screen_x = tile_screen_x + f64::from(point[0]) * tile_display_size;
-                let screen_y = tile_screen_y + f64::from(point[1]) * tile_display_size;
-                points_ndc.push(self.screen_px_to_ndc(screen_x, screen_y, pixel_width, pixel_height));
-            }
-
-            // Naive triangle fan triangulation. This is acceptable for the MVP proof but can
-            // produce artifacts on complex concave polygons; real triangulation comes next.
-            for index in 1..(points_ndc.len().saturating_sub(1)) {
-                let a = points_ndc[0];
-                let b = points_ndc[index];
-                let c = points_ndc[index + 1];
-                water_triangles_ndc.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
-            }
+        water_triangles_ndc.reserve(prepared.water_triangles.len());
+        for point in prepared.water_triangles.chunks_exact(2) {
+            let ndc = self.screen_px_to_ndc(
+                tile_screen_x + f64::from(point[0]) * tile_display_size,
+                tile_screen_y + f64::from(point[1]) * tile_display_size,
+                pixel_width,
+                pixel_height,
+            );
+            water_triangles_ndc.extend_from_slice(&[ndc[0], ndc[1]]);
         }
 
-        for path in &scene.transportation_lines {
-            if path.len() < 2 {
-                continue;
-            }
-
-            for segment in path.windows(2) {
-                let start = segment[0];
-                let end = segment[1];
-                let start_ndc = self.screen_px_to_ndc(
-                    tile_screen_x + f64::from(start[0]) * tile_display_size,
-                    tile_screen_y + f64::from(start[1]) * tile_display_size,
-                    pixel_width,
-                    pixel_height,
-                );
-                let end_ndc = self.screen_px_to_ndc(
-                    tile_screen_x + f64::from(end[0]) * tile_display_size,
-                    tile_screen_y + f64::from(end[1]) * tile_display_size,
-                    pixel_width,
-                    pixel_height,
-                );
-                transportation_segments_ndc.extend_from_slice(&[
-                    start_ndc[0],
-                    start_ndc[1],
-                    end_ndc[0],
-                    end_ndc[1],
-                ]);
-            }
+        transportation_segments_ndc.reserve(prepared.transportation_segments.len());
+        for point in prepared.transportation_segments.chunks_exact(2) {
+            let ndc = self.screen_px_to_ndc(
+                tile_screen_x + f64::from(point[0]) * tile_display_size,
+                tile_screen_y + f64::from(point[1]) * tile_display_size,
+                pixel_width,
+                pixel_height,
+            );
+            transportation_segments_ndc.extend_from_slice(&[ndc[0], ndc[1]]);
         }
     }
 
@@ -2606,9 +2840,8 @@ impl VectorEngineState {
                     continue;
                 }
 
-                if let Some(tile) = self.tile_cache.get_mut(&key) {
-                    self.cache_tick = self.cache_tick.saturating_add(1);
-                    tile.last_used = self.cache_tick;
+                if self.touch_cached_tile(key) {
+                    if let Some(tile) = self.tile_cache.get(&key) {
                     Self::draw_scene_canvas2d(
                         ctx,
                         &tile.scene,
@@ -2617,11 +2850,13 @@ impl VectorEngineState {
                         params.tile_display_size,
                         params.display_scale,
                     );
+                    }
                 }
             }
         }
     }
 
+    #[allow(dead_code)]
     fn append_cached_level_geometry_webgl(
         &mut self,
         z: u8,
@@ -2659,16 +2894,10 @@ impl VectorEngineState {
                     continue;
                 }
 
-                let mut tile_scene_for_draw: Option<VectorTileScene> = None;
-                if let Some(tile) = self.tile_cache.get_mut(&key) {
-                    self.cache_tick = self.cache_tick.saturating_add(1);
-                    tile.last_used = self.cache_tick;
-                    tile_scene_for_draw = Some(tile.scene.clone());
-                }
-
-                if let Some(scene) = tile_scene_for_draw.as_ref() {
-                    self.append_tile_scene_geometry(
-                        scene,
+                if self.touch_cached_tile(key) {
+                    if let Some(tile) = self.tile_cache.get(&key) {
+                        self.append_prepared_tile_geometry(
+                        &tile.prepared_geometry,
                         screen_x,
                         screen_y,
                         params.tile_display_size,
@@ -2677,6 +2906,7 @@ impl VectorEngineState {
                         water_triangles_ndc,
                         transportation_segments_ndc,
                     );
+                    }
                 }
             }
         }
@@ -2831,17 +3061,17 @@ impl VectorEngineState {
                     continue;
                 }
 
-                if let Some(tile) = self.tile_cache.get_mut(&key) {
-                    self.cache_tick = self.cache_tick.saturating_add(1);
-                    tile.last_used = self.cache_tick;
-                    Self::draw_scene_canvas2d(
-                        &ctx,
-                        &tile.scene,
-                        screen_x,
-                        screen_y,
-                        tile_display_size,
-                        display_scale,
-                    );
+                if self.touch_cached_tile(key) {
+                    if let Some(tile) = self.tile_cache.get(&key) {
+                        Self::draw_scene_canvas2d(
+                            &ctx,
+                            &tile.scene,
+                            screen_x,
+                            screen_y,
+                            tile_display_size,
+                            display_scale,
+                        );
+                    }
                 } else if self.pending_tiles.contains(&key) {
                     ctx.set_fill_style_str("#f3f2ee");
                     ctx.fill_rect(screen_x, screen_y, tile_display_size, tile_display_size);
@@ -2883,18 +3113,12 @@ impl VectorEngineState {
         let min_ty = (top_left_world_y / tile_size_f).floor() as i64 - 1;
         let max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64 + 1;
 
-        let mut water_triangles_ndc: Vec<f32> = Vec::new();
-        let mut transportation_segments_ndc: Vec<f32> = Vec::new();
         let pixel_width_f = f64::from(pixel_width.max(1));
         let pixel_height_f = f64::from(pixel_height.max(1));
+        let mut fallback_draw_commands: Vec<VectorGlTileDrawCommand> = Vec::new();
+        let mut target_draw_commands: Vec<VectorGlTileDrawCommand> = Vec::new();
         if let Some(fallback_zoom) = self.fallback_zoom_for_frame(fetch_zoom) {
-            self.append_cached_level_geometry_webgl(
-                fallback_zoom,
-                pixel_width_f,
-                pixel_height_f,
-                &mut water_triangles_ndc,
-                &mut transportation_segments_ndc,
-            );
+            self.collect_cached_level_gl_draw_commands(fallback_zoom, 1, &mut fallback_draw_commands);
         }
 
         gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
@@ -2925,32 +3149,20 @@ impl VectorEngineState {
                 }
 
                 let mut placeholder_fill_color: Option<(f32, f32, f32)> = None;
-                let mut tile_scene_for_draw: Option<VectorTileScene> = None;
-
                 let x_px = (screen_x * self.dpr).round() as i32;
                 let y_px = ((self.height - (screen_y + tile_display_size)) * self.dpr).round() as i32;
                 let w_px = ((tile_display_size * self.dpr).round() as i32).max(1);
                 let h_px = ((tile_display_size * self.dpr).round() as i32).max(1);
 
-                if let Some(tile) = self.tile_cache.get_mut(&key) {
-                    self.cache_tick = self.cache_tick.saturating_add(1);
-                    tile.last_used = self.cache_tick;
-                    tile_scene_for_draw = Some(tile.scene.clone());
-                } else if self.pending_tiles.contains(&key) {
-                    placeholder_fill_color = Some((0.952, 0.950, 0.942));
-                }
-
-                if let Some(scene) = tile_scene_for_draw.as_ref() {
-                    self.append_tile_scene_geometry(
-                        scene,
+                if self.tile_cache.contains_key(&key) {
+                    target_draw_commands.push(VectorGlTileDrawCommand {
+                        key,
                         screen_x,
                         screen_y,
                         tile_display_size,
-                        pixel_width_f,
-                        pixel_height_f,
-                        &mut water_triangles_ndc,
-                        &mut transportation_segments_ndc,
-                    );
+                    });
+                } else if self.pending_tiles.contains(&key) {
+                    placeholder_fill_color = Some((0.952, 0.950, 0.942));
                 }
 
                 if let Some((r, g, b)) = placeholder_fill_color {
@@ -2963,19 +3175,51 @@ impl VectorEngineState {
 
         gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
         if let Some(painter) = self.painter.clone() {
-            painter.draw_arrays(
-                &gl,
-                WebGl2RenderingContext::TRIANGLES,
-                &water_triangles_ndc,
-                [0.70, 0.86, 0.95, 1.0],
-            );
+            for cmd in &fallback_draw_commands {
+                self.draw_cached_tile_webgl_layers(
+                    &gl,
+                    &painter,
+                    *cmd,
+                    pixel_width_f,
+                    pixel_height_f,
+                    true,
+                    false,
+                );
+            }
+            for cmd in &target_draw_commands {
+                self.draw_cached_tile_webgl_layers(
+                    &gl,
+                    &painter,
+                    *cmd,
+                    pixel_width_f,
+                    pixel_height_f,
+                    true,
+                    false,
+                );
+            }
             gl.line_width(1.0);
-            painter.draw_arrays(
-                &gl,
-                WebGl2RenderingContext::LINES,
-                &transportation_segments_ndc,
-                [0.867, 0.839, 0.788, 1.0],
-            );
+            for cmd in &fallback_draw_commands {
+                self.draw_cached_tile_webgl_layers(
+                    &gl,
+                    &painter,
+                    *cmd,
+                    pixel_width_f,
+                    pixel_height_f,
+                    false,
+                    true,
+                );
+            }
+            for cmd in &target_draw_commands {
+                self.draw_cached_tile_webgl_layers(
+                    &gl,
+                    &painter,
+                    *cmd,
+                    pixel_width_f,
+                    pixel_height_f,
+                    false,
+                    true,
+                );
+            }
         }
     }
 

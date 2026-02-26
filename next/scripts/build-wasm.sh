@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WASM_CRATE="$ROOT_DIR/../rust/crates/map-engine-wasm"
 OUT_DIR="$ROOT_DIR/src/wasm/pkg"
+PUBLIC_OUT_DIR="$ROOT_DIR/public/wasm-pkg"
 
 if ! command -v wasm-pack >/dev/null 2>&1; then
   echo "error: wasm-pack is required but not installed."
@@ -12,6 +13,7 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
 fi
 
 mkdir -p "$OUT_DIR"
+mkdir -p "$PUBLIC_OUT_DIR"
 
 wasm-pack build "$WASM_CRATE" \
   --target web \
@@ -32,3 +34,7 @@ cat > "$OUT_DIR/.gitignore" <<'EOF'
 !snippets/
 !snippets/**
 EOF
+
+# Also publish a raw static copy for worker-side loading in dev/prod. This avoids bundler
+# transforms/caching issues for the wasm JS glue inside module workers.
+cp -R "$OUT_DIR"/. "$PUBLIC_OUT_DIR"/

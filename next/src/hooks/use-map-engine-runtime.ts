@@ -710,12 +710,9 @@ export function useMapEngineRuntime({
         backend: desiredInitConfigRef.current.engineKind === "vector" ? "webgl2" : "canvas2d",
         mode: "none"
       };
-      // Turbopack dev can serve a stale/incompatible worker-side wasm glue module when the wasm
-      // import surface changes (e.g. after adding WebGL bindings for the vector engine), which
-      // causes instantiate-time import errors. Keep dev on main-thread runtime; production can
-      // still use the worker path for raster.
-      const preferWorkerForStyle =
-        process.env.NODE_ENV === "production" && desiredInitConfigRef.current.engineKind === "raster";
+      // Prefer the worker path whenever OffscreenCanvas is available. The worker now uses a
+      // cache-busted runtime wasm loader to avoid stale glue mismatches during dev rebuilds.
+      const preferWorkerForStyle = true;
 
       const offscreenCapable =
         preferWorkerForStyle &&

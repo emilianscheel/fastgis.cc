@@ -45,6 +45,10 @@ type WasmModule = {
 
 const workerContext = self as unknown as DedicatedWorkerGlobalScope;
 const wasmBinaryUrl = new URL("../wasm/pkg/map_engine_wasm_bg.wasm", import.meta.url);
+const wasmModuleJsUrl = new URL("../wasm/pkg/map_engine_wasm.js", import.meta.url);
+const publicWasmBinaryPath = "/wasm-pkg/map_engine_wasm_bg.wasm";
+const publicWasmModulePath = "/wasm-pkg/map_engine_wasm.js";
+const workerCacheBustToken = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 let wasmModulePromise: Promise<WasmModule> | null = null;
 let engine: WasmMapEngine | null = null;
@@ -79,23 +83,82 @@ function normalizeError(error: unknown): string {
 
 async function loadWasmModule(): Promise<WasmModule> {
   if (!wasmModulePromise) {
-    wasmModulePromise = import("../wasm/pkg/map_engine_wasm.js").then(async (module) => {
-      const wasmPath = typeof wasmBinaryUrl === "string" ? wasmBinaryUrl : wasmBinaryUrl.toString();
-
-      if (/^https?:\/\//i.test(wasmPath)) {
-        await module.default(wasmPath);
-      } else if (wasmPath.startsWith("/")) {
-        const origin = appOrigin ?? workerContext.location.origin;
-        if (origin && origin !== "null") {
-          await module.default(new URL(wasmPath, origin).toString());
-        } else {
-          await module.default(wasmPath);
+    wasmModulePromise = (async () => {
+      const resolveRuntimeAssetUrl = (input: URL | string, cacheBust: boolean): string => {
+        const raw = typeof input === "string" ? input : input.toString();
+        let resolved = raw;
+        if (!/^https?:\/\//i.test(resolved) && resolved.startsWith("/")) {
+          const origin = appOrigin ?? workerContext.location.origin;
+          if (origin && origin !== "null") {
+            resolved = new URL(resolved, origin).toString();
+          }
         }
-      } else {
-        await module.default(wasmPath);
+
+        if (!cacheBust) {
+          return resolved;
+        }
+
+        const url = new URL(resolved, workerContext.location.href);
+        url.searchParams.set("__worker_wasm", workerCacheBustToken);
+        return url.toString();
+      };
+
+      const importWasmModuleViaBlob = async (runtimeModuleUrl: string): Promise<WasmModule> => {
+        const response = await fetch(runtimeModuleUrl, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch wasm JS module (${response.status})`);
+        }
+
+        const baseUrl = new URL(runtimeModuleUrl, workerContext.location.href);
+        let source = await response.text();
+        const rewriteRelativeImport = (_full: string, quote: string, specifier: string): string => {
+          const rewritten = resolveRuntimeAssetUrl(new URL(specifier, baseUrl), true);
+          return `from ${quote}${rewritten}${quote}`;
+        };
+
+        // Rewrite relative static imports so Turbopack-generated helper modules are cache-busted too.
+        source = source.replace(
+          /\bfrom\s+(['"])(\.{1,2}\/[^'"]+)\1/g,
+          rewriteRelativeImport
+        );
+        source = source.replace(
+          /\bimport\(\s*(['"])(\.{1,2}\/[^'"]+)\1\s*\)/g,
+          (_full, quote: string, specifier: string) =>
+            `import(${quote}${resolveRuntimeAssetUrl(new URL(specifier, baseUrl), true)}${quote})`
+        );
+
+        const blob = new Blob([source], { type: "text/javascript" });
+        const blobUrl = URL.createObjectURL(blob);
+        try {
+          return (await import(/* webpackIgnore: true */ blobUrl)) as unknown as WasmModule;
+        } finally {
+          // Revoke asynchronously so the module loader can finish reading the blob.
+          queueMicrotask(() => URL.revokeObjectURL(blobUrl));
+        }
+      };
+
+      let module: WasmModule;
+      let wasmPath: string;
+      try {
+        const runtimeModuleUrl = resolveRuntimeAssetUrl(publicWasmModulePath, true);
+        module = await importWasmModuleViaBlob(runtimeModuleUrl);
+        wasmPath = resolveRuntimeAssetUrl(publicWasmBinaryPath, true);
+      } catch {
+        try {
+          const runtimeModuleUrl = resolveRuntimeAssetUrl(wasmModuleJsUrl, true);
+          module = await importWasmModuleViaBlob(runtimeModuleUrl);
+          wasmPath = resolveRuntimeAssetUrl(wasmBinaryUrl, true);
+        } catch {
+          module = (await import("../wasm/pkg/map_engine_wasm.js")) as unknown as WasmModule;
+          wasmPath = resolveRuntimeAssetUrl(wasmBinaryUrl, true);
+        }
       }
 
-      return module as unknown as WasmModule;
+      await module.default(wasmPath);
+      return module;
+    })().catch((error) => {
+      wasmModulePromise = null;
+      throw error;
     });
   }
   return wasmModulePromise;
