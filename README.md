@@ -1,4 +1,4 @@
-# `fastgis.cc`
+# [`fastgis.cc`](https://fastgis.cc)
 
 Monorepo-lite structure (no Turborepo/Nx):
 
