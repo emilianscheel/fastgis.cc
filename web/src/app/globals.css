@@ -100,35 +100,53 @@ button {
 }
 
 .trajectory-points {
-  display: grid;
-  grid-template-rows: 0fr;
+  max-height: 0;
+  overflow: hidden;
   opacity: 0;
-  transition: grid-template-rows 180ms ease, opacity 180ms ease;
+  transition: max-height 120ms ease-out, opacity 100ms ease-out;
 }
 
 .trajectory-points.is-expanded {
-  grid-template-rows: 1fr;
+  max-height: 280px;
   opacity: 1;
 }
 
 .trajectory-points-scroll {
-  min-height: 0;
-  max-height: 280px;
   overflow-y: auto;
   padding: 0 6px;
 }
 
+.trajectory-points-spacer {
+  position: relative;
+}
+
+.trajectory-points-window {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  will-change: transform;
+}
+
 .trajectory-point-row {
-  display: block;
+  display: grid;
+  grid-template-columns: 2.5rem 10.75rem auto;
+  align-items: center;
   width: 100%;
+  height: 28px;
   border: 0;
   border-radius: 5px;
   background: transparent;
   color: inherit;
   cursor: pointer;
-  padding: 5px 8px 5px 34px;
+  padding: 0 8px;
   text-align: left;
   font: 500 12px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+
+.trajectory-point-line {
+  color: color-mix(in srgb, var(--panel-text) 45%, transparent);
 }
 
 .trajectory-point-row:hover {

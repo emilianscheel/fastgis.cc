@@ -243,18 +243,7 @@ export function MapView() {
                   </Button>
                 </div>
                 <div className={`trajectory-points ${expanded ? "is-expanded" : ""}`}>
-                  <div className="trajectory-points-scroll">
-                    {trajectory.points.map((point, index) => (
-                      <Button
-                        className="trajectory-point-row"
-                        key={`${point.timestamp}-${index}`}
-                        onClick={() => selectTrajectoryPoint(point)}
-                        type="button"
-                      >
-                        {point.timestamp}
-                      </Button>
-                    ))}
-                  </div>
+                  <TrajectoryPointList points={trajectory.points} onSelect={selectTrajectoryPoint} />
                 </div>
               </div>
             );
@@ -398,6 +387,49 @@ function CopyValue({ label }: { label: string }) {
       <Button aria-label={`Copy ${label}`} className="icon-button" onClick={() => void navigator.clipboard.writeText(label)} type="button">
         <Copy size={15} />
       </Button>
+    </div>
+  );
+}
+
+const POINT_ROW_HEIGHT = 28;
+const VISIBLE_POINT_ROWS = 10;
+
+function TrajectoryPointList({
+  points,
+  onSelect,
+}: {
+  points: TrajectoryPoint[];
+  onSelect: (point: TrajectoryPoint) => void;
+}) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const firstVisibleIndex = Math.max(0, Math.floor(scrollTop / POINT_ROW_HEIGHT) - 2);
+  const visiblePoints = points.slice(firstVisibleIndex, firstVisibleIndex + VISIBLE_POINT_ROWS + 4);
+
+  return (
+    <div
+      className="trajectory-points-scroll"
+      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      style={{ height: POINT_ROW_HEIGHT * VISIBLE_POINT_ROWS }}
+    >
+      <div className="trajectory-points-spacer" style={{ height: points.length * POINT_ROW_HEIGHT }}>
+        <div className="trajectory-points-window" style={{ transform: `translateY(${firstVisibleIndex * POINT_ROW_HEIGHT}px)` }}>
+          {visiblePoints.map((point, offset) => {
+            const index = firstVisibleIndex + offset;
+            return (
+              <Button
+                className="trajectory-point-row"
+                key={`${point.timestamp}-${index}`}
+                onClick={() => onSelect(point)}
+                type="button"
+              >
+                <span className="trajectory-point-line">{index + 2}</span>
+                <span>{point.timestamp}</span>
+                <span>{point.latitude}, {point.longitude}</span>
+              </Button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
