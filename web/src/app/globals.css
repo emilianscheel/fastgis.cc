@@ -167,6 +167,23 @@ button {
   gap: 3px;
 }
 
+.axle-count {
+  display: inline-grid;
+  width: 1.75rem;
+  place-items: center;
+  perspective: 100px;
+  text-align: center;
+}
+
+.axle-count strong {
+  display: block;
+}
+
+.toll-rate {
+  color: color-mix(in srgb, var(--panel-text) 60%, transparent);
+  font-weight: 500;
+}
+
 .toll-icon-button {
   display: grid;
   width: 22px;

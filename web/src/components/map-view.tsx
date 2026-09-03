@@ -4,6 +4,7 @@ import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
 import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, Ruler, ScanSearch, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
+import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, MouseEvent, MutableRefObject } from "react";
 import type { FeatureCollection, LineString, Point } from "geojson";
@@ -532,8 +533,21 @@ function TollCard({
         <span>Axles</span>
         <span className="axle-control">
           <Button aria-label="Decrease axles" className="toll-icon-button" disabled={settings.axles === 1} onClick={() => onChange({ ...settings, axles: settings.axles - 1 })} type="button"><Minus size={14} /></Button>
-          <strong>{settings.axles} × €0.20</strong>
+          <span className="axle-count">
+            <AnimatePresence initial={false} mode="popLayout">
+              <motion.strong
+                animate={{ opacity: 1, rotateX: 0, y: 0 }}
+                exit={{ opacity: 0, rotateX: -90, y: -8 }}
+                initial={{ opacity: 0, rotateX: 90, y: 8 }}
+                key={settings.axles}
+                transition={{ duration: 0.16 }}
+              >
+                {settings.axles}
+              </motion.strong>
+            </AnimatePresence>
+          </span>
           <Button aria-label="Increase axles" className="toll-icon-button" onClick={() => onChange({ ...settings, axles: settings.axles + 1 })} type="button"><Plus size={14} /></Button>
+          <span className="toll-rate">× €0.20</span>
         </span>
         <strong>{formatEuro(toll.axleCharge)}</strong>
       </div>
