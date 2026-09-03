@@ -1,8 +1,0 @@
-[workspace]
-members = [
-  "crates/map-core",
-  "crates/map-engine-wasm",
-]
-resolver = "2"
-default-members = ["crates/map-core"]
-
