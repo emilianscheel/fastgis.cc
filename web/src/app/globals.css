@@ -129,7 +129,7 @@ button {
   position: absolute;
   top: 12px;
   z-index: 1;
-  width: 340px;
+  width: 430px;
   box-shadow: 0 2px 10px rgb(0 0 0 / 12%);
   backdrop-filter: blur(10px);
 }
@@ -137,13 +137,19 @@ button {
 .toll-row,
 .toll-total {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 72px 1fr 86px;
   align-items: center;
   gap: 8px;
 }
 
 .toll-row {
+  padding: 5px 0 11px;
+  border-bottom: 1px solid var(--panel-border);
   color: color-mix(in srgb, var(--panel-text) 60%, transparent);
+}
+
+.toll-row > :nth-child(2) {
+  justify-self: center;
 }
 
 .toll-row strong {
@@ -192,19 +198,23 @@ button {
 }
 
 .emission-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 72px 1fr 86px;
   align-items: center;
   gap: 8px;
+  padding: 5px 0 11px;
+  border-bottom: 1px solid var(--panel-border);
   color: color-mix(in srgb, var(--panel-text) 60%, transparent);
 }
 
 .emission-row strong {
   color: var(--panel-text);
+  justify-self: end;
   white-space: nowrap;
 }
 
 .emission-group {
-  margin-left: auto;
+  justify-self: center;
 }
 
 .emission-button {
@@ -230,10 +240,9 @@ button {
 
 .toll-total {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 3px;
-  padding-top: 5px;
-  border-top: 1px solid var(--panel-border);
+  padding: 7px 0 2px;
   font-size: 13px;
   text-align: right;
 }
@@ -244,7 +253,7 @@ button {
   height: 22px;
   place-items: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: 3px;
   background: transparent;
   color: inherit;
   cursor: pointer;

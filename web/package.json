@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
+    "geist": "^1.7.2",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.40.0",
     "maplibre-gl": "^6.7.0",

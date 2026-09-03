@@ -523,7 +523,11 @@ function TollCard({
 
   return (
     <section className={["toll-card", className].filter(Boolean).join(" ")} style={style}>
-      <div className="toll-row"><span>{kilometers.toFixed(2)} km × €1.00</span><strong>{formatEuro(toll.distanceCharge)}</strong></div>
+      <div className="toll-row">
+        <span>Base</span>
+        <span>{kilometers.toFixed(2)} km × €1.00</span>
+        <strong>{formatEuro(toll.distanceCharge)}</strong>
+      </div>
       <div className="toll-row">
         <span>Axles</span>
         <span className="axle-control">
@@ -551,10 +555,10 @@ function TollCard({
         <strong>{formatEuro(toll.emissionSurcharge)}</strong>
       </div>
       <div className="toll-total">
-        <strong>{formatEuro(toll.total)}</strong>
         <Button aria-label={`Download toll receipt for ${trajectory.name}`} className="receipt-button" onClick={() => void downloadReceipt(trajectory, settings, kilometers, toll)} type="button">
           <Download size={15} />
         </Button>
+        <strong>{formatEuro(toll.total)}</strong>
       </div>
     </section>
   );
@@ -562,26 +566,40 @@ function TollCard({
 
 async function downloadReceipt(trajectory: Trajectory, settings: TollSettings, kilometers: number, toll: ReturnType<typeof calculateToll>) {
   const { jsPDF } = await import("jspdf");
-  const receipt = new jsPDF({ unit: "mm", format: [80, 110] });
+  const receipt = new jsPDF({ unit: "mm", format: "a4" });
   const euro = (value: number) => `EUR ${value.toFixed(2)}`;
+  const left = 24;
+  const middle = 105;
+  const right = 186;
+  const separator = (y: number) => {
+    receipt.setDrawColor(190);
+    receipt.setLineWidth(0.15);
+    receipt.line(left, y, right, y);
+  };
+  const row = (y: number, label: string, configuration: string, amount: string) => {
+    receipt.setFont("helvetica", "normal");
+    receipt.setTextColor(110);
+    receipt.setFontSize(9);
+    receipt.text(label, left, y);
+    receipt.text(configuration, middle, y, { align: "center" });
+    receipt.setFont("helvetica", "bold");
+    receipt.setTextColor(25);
+    receipt.text(amount, right, y, { align: "right" });
+    separator(y + 5);
+  };
+
   receipt.setFont("helvetica", "bold");
-  receipt.setFontSize(14);
-  receipt.text("TOLL RECEIPT", 8, 12);
-  receipt.setFont("helvetica", "normal");
-  receipt.setFontSize(8);
-  receipt.text(trajectory.name, 8, 19, { maxWidth: 64 });
-  receipt.text(`${kilometers.toFixed(2)} km × EUR 1.00`, 8, 31);
-  receipt.text(euro(toll.distanceCharge), 72, 31, { align: "right" });
-  receipt.text(`${settings.axles} axles × EUR 0.20`, 8, 38);
-  receipt.text(euro(toll.axleCharge), 72, 38, { align: "right" });
-  receipt.text(`Euro class +${settings.emissionClass * 10}%`, 8, 45);
-  receipt.text(euro(toll.emissionSurcharge), 72, 45, { align: "right" });
-  receipt.setLineWidth(0.2);
-  receipt.line(8, 53, 72, 53);
+  receipt.setFontSize(15);
+  receipt.setTextColor(25);
+  receipt.text("TOLL RECEIPT", left, 28);
+  separator(38);
+  row(52, "Base", `${kilometers.toFixed(2)} km × EUR 1.00`, euro(toll.distanceCharge));
+  row(70, "Axles", `${settings.axles} × EUR 0.20`, euro(toll.axleCharge));
+  row(88, "Emission", `Euro ${EMISSION_CLASSES[settings.emissionClass].label} +${settings.emissionClass * 10}%`, euro(toll.emissionSurcharge));
   receipt.setFont("helvetica", "bold");
   receipt.setFontSize(13);
-  receipt.text("TOTAL", 8, 62);
-  receipt.text(euro(toll.total), 72, 62, { align: "right" });
+  receipt.setTextColor(0);
+  receipt.text(euro(toll.total), right, 108, { align: "right" });
   receipt.save(`${trajectory.name.replace(/\.csv$/i, "")}-toll-receipt.pdf`);
 }
 
