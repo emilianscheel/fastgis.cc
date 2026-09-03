@@ -527,7 +527,7 @@ function TollCard({
       <div className="toll-row">
         <span>Base</span>
         <span>{kilometers.toFixed(2)} km × €1.00</span>
-        <strong>{formatEuro(toll.distanceCharge)}</strong>
+        <AnimatedAmount value={formatEuro(toll.distanceCharge)} />
       </div>
       <div className="toll-row">
         <span>Axles</span>
@@ -549,7 +549,7 @@ function TollCard({
           <Button aria-label="Increase axles" className="toll-icon-button" onClick={() => onChange({ ...settings, axles: settings.axles + 1 })} type="button"><Plus size={14} /></Button>
           <span className="toll-rate">× €0.20</span>
         </span>
-        <strong>{formatEuro(toll.axleCharge)}</strong>
+        <AnimatedAmount value={formatEuro(toll.axleCharge)} />
       </div>
       <div className="emission-row">
         <span>Emission</span>
@@ -566,15 +566,33 @@ function TollCard({
             </Button>
           ))}
         </ButtonGroup>
-        <strong>{formatEuro(toll.emissionSurcharge)}</strong>
+        <AnimatedAmount value={formatEuro(toll.emissionSurcharge)} />
       </div>
       <div className="toll-total">
         <Button aria-label={`Download toll receipt for ${trajectory.name}`} className="receipt-button" onClick={() => void downloadReceipt(trajectory, settings, kilometers, toll)} type="button">
           <Download size={15} />
         </Button>
-        <strong>{formatEuro(toll.total)}</strong>
+        <AnimatedAmount value={formatEuro(toll.total)} />
       </div>
     </section>
+  );
+}
+
+function AnimatedAmount({ value }: { value: string }) {
+  return (
+    <span className="animated-amount">
+      <AnimatePresence initial={false} mode="popLayout">
+        <motion.strong
+          animate={{ opacity: 1, rotateX: 0, y: 0 }}
+          exit={{ opacity: 0, rotateX: -90, y: -8 }}
+          initial={{ opacity: 0, rotateX: 90, y: 8 }}
+          key={value}
+          transition={{ duration: 0.16 }}
+        >
+          {value}
+        </motion.strong>
+      </AnimatePresence>
+    </span>
   );
 }
 

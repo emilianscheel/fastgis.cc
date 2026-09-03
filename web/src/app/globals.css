@@ -156,6 +156,16 @@ button {
   color: var(--panel-text);
 }
 
+.animated-amount {
+  display: inline-grid;
+  justify-self: end;
+  perspective: 100px;
+}
+
+.animated-amount strong {
+  display: block;
+}
+
 .toll-row > strong:last-child,
 .toll-total strong {
   text-align: right;
