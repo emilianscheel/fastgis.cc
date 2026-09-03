@@ -2,13 +2,14 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Ruler, ScanSearch, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, Ruler, ScanSearch, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useRef, useState } from "react";
-import type { DragEvent, MouseEvent, MutableRefObject } from "react";
+import type { CSSProperties, DragEvent, MouseEvent, MutableRefObject } from "react";
 import type { FeatureCollection, LineString, Point } from "geojson";
 
 import { readSessionState, writeSessionState } from "@/lib/session-state";
+import { ButtonGroup } from "@/components/ui/button-group";
 import {
   parseTrajectoryCsv,
   trajectoryColor,
@@ -24,6 +25,17 @@ const TRAJECTORY_SOURCE = "trajectories";
 const TRAJECTORY_LINE_LAYER = "trajectory-lines";
 const TRAJECTORY_POINT_LAYER = "trajectory-points";
 const MEASUREMENT_SOURCE = "measurement";
+const EMISSION_CLASSES = [
+  { label: "0", multiplier: 0 },
+  { label: "I", multiplier: 1 },
+  { label: "II", multiplier: 2 },
+  { label: "III", multiplier: 3 },
+  { label: "IV", multiplier: 4 },
+  { label: "V", multiplier: 5 },
+  { label: "VI", multiplier: 6 },
+];
+
+type TollSettings = { axles: number; emissionClass: number };
 
 export function MapView() {
   const { resolvedTheme } = useTheme();
@@ -44,7 +56,9 @@ export function MapView() {
   const [expandedTrajectoryId, setExpandedTrajectoryId] = useState<string | null>(null);
   const [areaZoomEnabled, setAreaZoomEnabled] = useState(false);
   const [zoomSelection, setZoomSelection] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
+  const [tollSettings, setTollSettings] = useState<Record<string, TollSettings>>({});
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
+  const expandedTrajectory = trajectories.find((trajectory) => trajectory.id === expandedTrajectoryId);
 
   useEffect(() => {
     const animationFrame = window.requestAnimationFrame(() => {
@@ -337,6 +351,15 @@ export function MapView() {
           })}
         </aside>
       )}
+      {expandedTrajectory && (
+        <TollCard
+          className="floating-toll-card"
+          settings={tollSettings[expandedTrajectory.id] ?? { axles: 2, emissionClass: 0 }}
+          trajectory={expandedTrajectory}
+          onChange={(settings) => setTollSettings((current) => ({ ...current, [expandedTrajectory.id]: settings }))}
+          style={{ left: `${trajectoryPanelWidth(trajectories) + 24}px` }}
+        />
+      )}
       {selectedPoint && (
         <aside className="point-card" style={{ left: pointCardPosition.x, top: pointCardPosition.y }}>
           <CopyValue label={`${selectedPoint.latitude}, ${selectedPoint.longitude}`} />
@@ -458,6 +481,20 @@ function formatDistance(meters: number) {
   return meters >= 1_000 ? `${(meters / 1_000).toFixed(2)} km` : `${Math.round(meters)} m`;
 }
 
+function trajectoryDistanceKilometers(trajectory: Trajectory) {
+  return trajectory.points.slice(1).reduce(
+    (total, point, index) => total + haversine(trajectory.points[index].coordinate, point.coordinate),
+    0,
+  ) / 1_000;
+}
+
+function calculateToll(distanceKilometers: number, settings: TollSettings) {
+  const distanceCharge = distanceKilometers;
+  const axleCharge = settings.axles * 0.2;
+  const emissionSurcharge = (distanceCharge + axleCharge) * settings.emissionClass * 0.1;
+  return { distanceCharge, axleCharge, emissionSurcharge, total: distanceCharge + axleCharge + emissionSurcharge };
+}
+
 function downloadTrajectory(trajectory: Trajectory) {
   const url = URL.createObjectURL(new Blob([trajectory.csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
@@ -465,6 +502,87 @@ function downloadTrajectory(trajectory: Trajectory) {
   link.download = trajectory.name;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function TollCard({
+  trajectory,
+  settings,
+  onChange,
+  className,
+  style,
+}: {
+  trajectory: Trajectory;
+  settings: TollSettings;
+  onChange: (settings: TollSettings) => void;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  const kilometers = trajectoryDistanceKilometers(trajectory);
+  const toll = calculateToll(kilometers, settings);
+  const formatEuro = (value: number) => new Intl.NumberFormat(undefined, { style: "currency", currency: "EUR" }).format(value);
+
+  return (
+    <section className={["toll-card", className].filter(Boolean).join(" ")} style={style}>
+      <div className="toll-row"><span>{kilometers.toFixed(2)} km × €1.00</span><strong>{formatEuro(toll.distanceCharge)}</strong></div>
+      <div className="toll-row">
+        <span>Axles</span>
+        <span className="axle-control">
+          <Button aria-label="Decrease axles" className="toll-icon-button" disabled={settings.axles === 1} onClick={() => onChange({ ...settings, axles: settings.axles - 1 })} type="button"><Minus size={14} /></Button>
+          <strong>{settings.axles} × €0.20</strong>
+          <Button aria-label="Increase axles" className="toll-icon-button" onClick={() => onChange({ ...settings, axles: settings.axles + 1 })} type="button"><Plus size={14} /></Button>
+        </span>
+        <strong>{formatEuro(toll.axleCharge)}</strong>
+      </div>
+      <div className="emission-row">
+        <span>Emission</span>
+        <ButtonGroup aria-label="Emission class" className="emission-group">
+          {EMISSION_CLASSES.map((emissionClass) => (
+            <Button
+              aria-pressed={settings.emissionClass === emissionClass.multiplier}
+              className="emission-button"
+              key={emissionClass.label}
+              onClick={() => onChange({ ...settings, emissionClass: emissionClass.multiplier })}
+              type="button"
+            >
+              {emissionClass.label}
+            </Button>
+          ))}
+        </ButtonGroup>
+        <strong>{formatEuro(toll.emissionSurcharge)}</strong>
+      </div>
+      <div className="toll-total">
+        <strong>{formatEuro(toll.total)}</strong>
+        <Button aria-label={`Download toll receipt for ${trajectory.name}`} className="receipt-button" onClick={() => void downloadReceipt(trajectory, settings, kilometers, toll)} type="button">
+          <Download size={15} />
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+async function downloadReceipt(trajectory: Trajectory, settings: TollSettings, kilometers: number, toll: ReturnType<typeof calculateToll>) {
+  const { jsPDF } = await import("jspdf");
+  const receipt = new jsPDF({ unit: "mm", format: [80, 110] });
+  const euro = (value: number) => `EUR ${value.toFixed(2)}`;
+  receipt.setFont("helvetica", "bold");
+  receipt.setFontSize(14);
+  receipt.text("TOLL RECEIPT", 8, 12);
+  receipt.setFont("helvetica", "normal");
+  receipt.setFontSize(8);
+  receipt.text(trajectory.name, 8, 19, { maxWidth: 64 });
+  receipt.text(`${kilometers.toFixed(2)} km × EUR 1.00`, 8, 31);
+  receipt.text(euro(toll.distanceCharge), 72, 31, { align: "right" });
+  receipt.text(`${settings.axles} axles × EUR 0.20`, 8, 38);
+  receipt.text(euro(toll.axleCharge), 72, 38, { align: "right" });
+  receipt.text(`Euro class +${settings.emissionClass * 10}%`, 8, 45);
+  receipt.text(euro(toll.emissionSurcharge), 72, 45, { align: "right" });
+  receipt.setLineWidth(0.2);
+  receipt.line(8, 53, 72, 53);
+  receipt.setFont("helvetica", "bold");
+  receipt.setFontSize(13);
+  receipt.text("TOTAL", 8, 62);
+  receipt.text(euro(toll.total), 72, 62, { align: "right" });
+  receipt.save(`${trajectory.name.replace(/\.csv$/i, "")}-toll-receipt.pdf`);
 }
 
 function CopyValue({ label }: { label: string }) {
