@@ -199,7 +199,7 @@ export function MapView() {
         <Ruler size={18} />
       </Button>
       {trajectories.length > 0 && (
-        <aside className="trajectory-card">
+        <aside className="trajectory-card" style={{ width: `${trajectoryPanelWidth(trajectories)}px` }}>
           {trajectories.map((trajectory) => {
             const expanded = expandedTrajectoryId === trajectory.id;
             return (
@@ -416,20 +416,53 @@ function TrajectoryPointList({
           {visiblePoints.map((point, offset) => {
             const index = firstVisibleIndex + offset;
             return (
-              <Button
+              <div
                 className="trajectory-point-row"
                 key={`${point.timestamp}-${index}`}
-                onClick={() => onSelect(point)}
-                type="button"
               >
                 <span className="trajectory-point-line">{index + 2}</span>
-                <span>{point.timestamp}</span>
-                <span>{point.latitude}, {point.longitude}</span>
-              </Button>
+                <CopyPointCell point={point} value={point.timestamp} onSelect={onSelect} />
+                <CopyPointCell point={point} value={point.latitude} onSelect={onSelect} />
+                <CopyPointCell point={point} value={point.longitude} onSelect={onSelect} />
+              </div>
             );
           })}
         </div>
       </div>
     </div>
   );
+}
+
+function CopyPointCell({
+  point,
+  value,
+  onSelect,
+}: {
+  point: TrajectoryPoint;
+  value: string;
+  onSelect: (point: TrajectoryPoint) => void;
+}) {
+  return (
+    <Button
+      aria-label={`Copy ${value}`}
+      className="trajectory-point-cell"
+      onClick={() => {
+        onSelect(point);
+        void navigator.clipboard.writeText(value);
+      }}
+      type="button"
+    >
+      {value}
+    </Button>
+  );
+}
+
+function trajectoryPanelWidth(trajectories: Trajectory[]) {
+  const pointWidth = Math.max(
+    ...trajectories.flatMap((trajectory) => trajectory.points.map((point) =>
+      40 + 8 + point.timestamp.length * 7.25 + 8 + point.latitude.length * 7.25 + 8 + point.longitude.length * 7.25,
+    )),
+  );
+  const fileWidth = Math.max(...trajectories.map((trajectory) => 28 + trajectory.name.length * 7.25 + 84));
+  return Math.min(window.innerWidth - 24, Math.ceil(Math.max(pointWidth, fileWidth)));
 }
