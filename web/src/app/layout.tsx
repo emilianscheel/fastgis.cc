@@ -4,7 +4,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Trajectory map",
+  title: "fastgis.cc",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

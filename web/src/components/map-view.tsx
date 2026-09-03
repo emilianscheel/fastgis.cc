@@ -68,16 +68,6 @@ export function MapView() {
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       map.on("load", () => {
         syncTrajectories(map, trajectoriesRef.current);
-        map.on("click", TRAJECTORY_POINT_LAYER, (event) => {
-          const properties = event.features?.[0]?.properties;
-          if (!properties) return;
-          setSelectedPoint({
-            timestamp: properties.timestamp,
-            latitude: properties.latitude,
-            longitude: properties.longitude,
-            coordinate: [Number(properties.longitude), Number(properties.latitude)],
-          });
-        });
         map.on("mouseenter", TRAJECTORY_POINT_LAYER, () => {
           map.getCanvas().style.cursor = "pointer";
         });
@@ -91,7 +81,20 @@ export function MapView() {
         persist(map, trajectoriesRef.current);
       });
       map.on("click", (event) => {
-        if (!measurementEnabledRef.current) return;
+        if (!measurementEnabledRef.current) {
+          const properties = map.queryRenderedFeatures(event.point, { layers: [TRAJECTORY_POINT_LAYER] })[0]?.properties;
+          if (!properties) {
+            setSelectedPoint(null);
+            return;
+          }
+          setSelectedPoint({
+            timestamp: properties.timestamp,
+            latitude: properties.latitude,
+            longitude: properties.longitude,
+            coordinate: [Number(properties.longitude), Number(properties.latitude)],
+          });
+          return;
+        }
         setMeasurementPoints((points) => [...points, [event.lngLat.lng, event.lngLat.lat]]);
         setCursorPoint(null);
       });
