@@ -2,19 +2,27 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { Eye, EyeOff, Ruler, Trash2 } from "lucide-react";
+import { Copy, Download, Eye, EyeOff, Ruler, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, MutableRefObject } from "react";
-import type { FeatureCollection, LineString } from "geojson";
+import type { FeatureCollection, LineString, Point } from "geojson";
 
 import { readSessionState, writeSessionState } from "@/lib/session-state";
-import { parseTrajectoryCsv, trajectoryColor, type Coordinate, type Trajectory } from "@/lib/trajectory";
+import {
+  parseTrajectoryCsv,
+  trajectoryColor,
+  type Coordinate,
+  type Trajectory,
+  type TrajectoryPoint,
+} from "@/lib/trajectory";
 
 const LIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 const DARK_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
 const WORKER_URL = "/maplibre/maplibre-gl-worker.mjs";
 const TRAJECTORY_SOURCE = "trajectories";
+const TRAJECTORY_LINE_LAYER = "trajectory-lines";
+const TRAJECTORY_POINT_LAYER = "trajectory-points";
 const MEASUREMENT_SOURCE = "measurement";
 
 export function MapView() {
@@ -31,6 +39,7 @@ export function MapView() {
   const [measurementEnabled, setMeasurementEnabled] = useState(false);
   const [measurementPoints, setMeasurementPoints] = useState<Coordinate[]>([]);
   const [cursorPoint, setCursorPoint] = useState<Coordinate | null>(null);
+  const [selectedPoint, setSelectedPoint] = useState<TrajectoryPoint | null>(null);
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
 
   useEffect(() => {
@@ -55,7 +64,25 @@ export function MapView() {
       });
 
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-      map.on("load", () => syncTrajectories(map, trajectoriesRef.current));
+      map.on("load", () => {
+        syncTrajectories(map, trajectoriesRef.current);
+        map.on("click", TRAJECTORY_POINT_LAYER, (event) => {
+          const properties = event.features?.[0]?.properties;
+          if (!properties) return;
+          setSelectedPoint({
+            timestamp: properties.timestamp,
+            latitude: properties.latitude,
+            longitude: properties.longitude,
+            coordinate: [Number(properties.longitude), Number(properties.latitude)],
+          });
+        });
+        map.on("mouseenter", TRAJECTORY_POINT_LAYER, () => {
+          map.getCanvas().style.cursor = "pointer";
+        });
+        map.on("mouseleave", TRAJECTORY_POINT_LAYER, () => {
+          map.getCanvas().style.cursor = measurementEnabledRef.current ? "crosshair" : "";
+        });
+      });
       map.on("moveend", () => {
         const center = map.getCenter();
         cameraRef.current = { center: [center.lng, center.lat], zoom: map.getZoom() };
@@ -102,19 +129,20 @@ export function MapView() {
   }, [cursorPoint, measurementEnabled, measurementPoints]);
 
   async function importFiles(files: File[]) {
-    const imported = (await Promise.all(files.map(async (file) => ({
-      name: file.name,
-      coordinates: parseTrajectoryCsv(await file.text()),
-    })))).filter((file): file is { name: string; coordinates: Coordinate[] } => file.coordinates !== null);
+    const imported = (await Promise.all(files.map(async (file) => {
+      const csv = await file.text();
+      return { name: file.name, csv, points: parseTrajectoryCsv(csv) };
+    }))).filter((file): file is { name: string; csv: string; points: TrajectoryPoint[] } => file.points !== null);
 
     if (imported.length === 0) return;
     setTrajectories((current) => {
       const next = [...current, ...imported.map((file, index) => ({
         id: crypto.randomUUID(),
         name: file.name,
-        coordinates: file.coordinates,
+        points: file.points,
         visible: true,
         color: trajectoryColor(current.length + index),
+        csv: file.csv,
       }))];
       const map = mapRef.current;
       if (map) fitTrajectories(map, next);
@@ -151,6 +179,14 @@ export function MapView() {
             <div className="trajectory-row" key={trajectory.id}>
               <span className="trajectory-name" title={trajectory.name}>{trajectory.name}</span>
               <Button
+                aria-label={`Download ${trajectory.name}`}
+                className="icon-button"
+                onClick={() => downloadTrajectory(trajectory)}
+                type="button"
+              >
+                <Download size={16} />
+              </Button>
+              <Button
                 aria-label={trajectory.visible ? `Hide ${trajectory.name}` : `Show ${trajectory.name}`}
                 className="icon-button"
                 onClick={() => setTrajectories((current) => current.map((item) =>
@@ -172,6 +208,13 @@ export function MapView() {
           ))}
         </aside>
       )}
+      {selectedPoint && (
+        <aside className="point-card">
+          <CopyValue label={`${selectedPoint.latitude}, ${selectedPoint.longitude}`} />
+          <CopyValue label={selectedPoint.timestamp} />
+          <CopyValue label={new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(selectedPoint.timestamp))} />
+        </aside>
+      )}
     </main>
   );
 }
@@ -182,24 +225,41 @@ function persist(map: maplibregl.Map, trajectories: Trajectory[]) {
 }
 
 function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
-  const data: FeatureCollection<LineString, { color: string }> = {
+  const lines: FeatureCollection<LineString, { color: string }> = {
     type: "FeatureCollection",
     features: trajectories.filter((trajectory) => trajectory.visible).map((trajectory) => ({
       type: "Feature",
       properties: { color: trajectory.color },
-      geometry: { type: "LineString", coordinates: trajectory.coordinates },
+      geometry: { type: "LineString", coordinates: trajectory.points.map((point) => point.coordinate) },
     })),
   };
+  const points: FeatureCollection<Point, { timestamp: string; latitude: string; longitude: string }> = {
+    type: "FeatureCollection",
+    features: trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) =>
+      trajectory.points.map((point) => ({
+        type: "Feature" as const,
+        properties: { timestamp: point.timestamp, latitude: point.latitude, longitude: point.longitude },
+        geometry: { type: "Point" as const, coordinates: point.coordinate },
+      })),
+    ),
+  };
   const source = map.getSource(TRAJECTORY_SOURCE) as maplibregl.GeoJSONSource | undefined;
-  if (source) source.setData(data);
+  if (source) source.setData({ type: "FeatureCollection", features: [...lines.features, ...points.features] });
   else {
-    map.addSource(TRAJECTORY_SOURCE, { type: "geojson", data });
+    map.addSource(TRAJECTORY_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [...lines.features, ...points.features] } });
     map.addLayer({
-      id: "trajectory-lines",
+      id: TRAJECTORY_LINE_LAYER,
       type: "line",
       source: TRAJECTORY_SOURCE,
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.9 },
+    });
+    map.addLayer({
+      id: TRAJECTORY_POINT_LAYER,
+      type: "circle",
+      source: TRAJECTORY_SOURCE,
+      filter: ["==", "$type", "Point"],
+      paint: { "circle-radius": 3.5, "circle-color": "#000000" },
     });
   }
 }
@@ -241,7 +301,9 @@ function syncMeasurement(
 }
 
 function fitTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
-  const coordinates = trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) => trajectory.coordinates);
+  const coordinates = trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) =>
+    trajectory.points.map((point) => point.coordinate),
+  );
   if (coordinates.length === 0) return;
   const bounds = coordinates.reduce(
     (result, coordinate) => result.extend(coordinate),
@@ -265,4 +327,24 @@ function haversine([longitudeA, latitudeA]: Coordinate, [longitudeB, latitudeB]:
 
 function formatDistance(meters: number) {
   return meters >= 1_000 ? `${(meters / 1_000).toFixed(2)} km` : `${Math.round(meters)} m`;
+}
+
+function downloadTrajectory(trajectory: Trajectory) {
+  const url = URL.createObjectURL(new Blob([trajectory.csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = trajectory.name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function CopyValue({ label }: { label: string }) {
+  return (
+    <div className="point-value">
+      <span>{label}</span>
+      <Button aria-label={`Copy ${label}`} className="icon-button" onClick={() => void navigator.clipboard.writeText(label)} type="button">
+        <Copy size={15} />
+      </Button>
+    </div>
+  );
 }
