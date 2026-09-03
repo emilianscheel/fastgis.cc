@@ -2,10 +2,10 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Ruler, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Ruler, ScanSearch, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useRef, useState } from "react";
-import type { DragEvent, MutableRefObject } from "react";
+import type { DragEvent, MouseEvent, MutableRefObject } from "react";
 import type { FeatureCollection, LineString, Point } from "geojson";
 
 import { readSessionState, writeSessionState } from "@/lib/session-state";
@@ -42,6 +42,8 @@ export function MapView() {
   const [selectedPoint, setSelectedPoint] = useState<TrajectoryPoint | null>(null);
   const [pointCardPosition, setPointCardPosition] = useState({ x: 0, y: 0 });
   const [expandedTrajectoryId, setExpandedTrajectoryId] = useState<string | null>(null);
+  const [areaZoomEnabled, setAreaZoomEnabled] = useState(false);
+  const [zoomSelection, setZoomSelection] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
 
   useEffect(() => {
@@ -134,6 +136,19 @@ export function MapView() {
   }, [cursorPoint, measurementEnabled, measurementPoints]);
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMeasurementEnabled(false);
+      setMeasurementPoints([]);
+      setCursorPoint(null);
+      setAreaZoomEnabled(false);
+      setZoomSelection(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedPoint) return;
 
@@ -178,6 +193,41 @@ export function MapView() {
     }
   }
 
+  function startAreaZoom(event: MouseEvent<HTMLDivElement>) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setZoomSelection({
+      startX: event.clientX - bounds.left,
+      startY: event.clientY - bounds.top,
+      endX: event.clientX - bounds.left,
+      endY: event.clientY - bounds.top,
+    });
+  }
+
+  function updateAreaZoom(event: MouseEvent<HTMLDivElement>) {
+    if (!zoomSelection) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setZoomSelection((selection) => selection && ({
+      ...selection,
+      endX: event.clientX - bounds.left,
+      endY: event.clientY - bounds.top,
+    }));
+  }
+
+  function finishAreaZoom() {
+    if (!zoomSelection) return;
+    const map = mapRef.current;
+    const width = Math.abs(zoomSelection.endX - zoomSelection.startX);
+    const height = Math.abs(zoomSelection.endY - zoomSelection.startY);
+    if (map && width > 8 && height > 8) {
+      map.fitBounds([
+        map.unproject([zoomSelection.startX, zoomSelection.startY]),
+        map.unproject([zoomSelection.endX, zoomSelection.endY]),
+      ], { padding: 32, duration: 450, essential: true });
+    }
+    setZoomSelection(null);
+    setAreaZoomEnabled(false);
+  }
+
   return (
     <main
       className="map-root"
@@ -191,16 +241,51 @@ export function MapView() {
       <Button
         aria-label="Measure distance"
         aria-pressed={measurementEnabled}
-        className="measure-button"
+        className="map-tool-button"
         onClick={() => {
           setMeasurementEnabled((enabled) => !enabled);
           setMeasurementPoints([]);
           setCursorPoint(null);
+          setAreaZoomEnabled(false);
         }}
         type="button"
       >
         <Ruler size={18} />
       </Button>
+      <Button
+        aria-label="Zoom to area"
+        aria-pressed={areaZoomEnabled}
+        className="map-tool-button area-zoom-button"
+        onClick={() => {
+          setAreaZoomEnabled((enabled) => !enabled);
+          setMeasurementEnabled(false);
+          setMeasurementPoints([]);
+          setCursorPoint(null);
+        }}
+        type="button"
+      >
+        <ScanSearch size={18} />
+      </Button>
+      {areaZoomEnabled && (
+        <div
+          className="area-zoom-overlay"
+          onMouseDown={startAreaZoom}
+          onMouseMove={updateAreaZoom}
+          onMouseUp={finishAreaZoom}
+        >
+          {zoomSelection && (
+            <div
+              className="area-zoom-selection"
+              style={{
+                left: Math.min(zoomSelection.startX, zoomSelection.endX),
+                top: Math.min(zoomSelection.startY, zoomSelection.endY),
+                width: Math.abs(zoomSelection.endX - zoomSelection.startX),
+                height: Math.abs(zoomSelection.endY - zoomSelection.startY),
+              }}
+            />
+          )}
+        </div>
+      )}
       {trajectories.length > 0 && (
         <aside className="trajectory-card" style={{ width: `${trajectoryPanelWidth(trajectories)}px` }}>
           {trajectories.map((trajectory) => {

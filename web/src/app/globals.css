@@ -171,7 +171,7 @@ button {
 }
 
 .icon-button,
-.measure-button {
+.map-tool-button {
   display: inline-grid;
   place-items: center;
   border: 0;
@@ -187,21 +187,56 @@ button {
 }
 
 .icon-button:hover,
-.measure-button:hover {
+.map-tool-button:hover {
   background: var(--panel-hover);
 }
 
-.measure-button {
+.map-tool-button {
   position: absolute;
-  top: 64px;
+  top: 76px;
   right: 12px;
   z-index: 1;
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--panel-border);
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
   background: var(--panel);
+  outline: 1px solid #a1a1aa;
+  outline-offset: 0;
   box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
   backdrop-filter: blur(10px);
+}
+
+.map-tool-button svg {
+  display: block;
+}
+
+.map-tool-button[aria-pressed="true"] {
+  background: var(--panel-hover);
+}
+
+.map-tool-button:focus-visible {
+  outline: 2px solid #71717a;
+  outline-offset: 0;
+}
+
+.area-zoom-button {
+  top: 109px;
+}
+
+.area-zoom-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  cursor: crosshair;
+}
+
+.area-zoom-selection {
+  position: absolute;
+  border: 2px solid #2563eb;
+  background: rgb(37 99 235 / 12%);
+  pointer-events: none;
 }
 
 .point-card {
