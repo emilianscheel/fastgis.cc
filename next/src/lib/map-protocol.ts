@@ -38,6 +38,60 @@ export type ViewState = {
   zoom: number;
 };
 
+export type PerfTimingSeries = {
+  samples: number;
+  lastMs: number | null;
+  avgMs: number | null;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  maxMs: number | null;
+};
+
+export type VectorPerfZoomBytes = {
+  z: number;
+  avgTileBytes: number;
+  tiles: number;
+};
+
+export type VectorPerfStats = {
+  enabled: boolean;
+  frames: number;
+  fullRedrawFrames: number;
+  snapshotSurrogateFrames: number;
+  snapshotRatio: number;
+  staleResultDrops: number;
+  canceledRequests: number;
+  fetchErrors: number;
+  decodeErrors: number;
+  decodeQueueDrops: number;
+  bytesFetchedTotal: number;
+  tilesFetchedTotal: number;
+  recentFetchBytesPerSec: number;
+  frame: PerfTimingSeries;
+  fullDraw: PerfTimingSeries;
+  snapshotDraw: PerfTimingSeries;
+  fetch: PerfTimingSeries;
+  decode: PerfTimingSeries;
+  prepare: PerfTimingSeries;
+  glUpload: PerfTimingSeries;
+  visibleTileCount: number;
+  targetDrawCommands: number;
+  fallbackDrawCommands: number;
+  waterVerticesDrawn: number;
+  lineVerticesDrawn: number;
+  queueHigh: number;
+  queueMedium: number;
+  queueLow: number;
+  pending: number;
+  inFlight: number;
+  decodeBacklog: number;
+  fetchZoom: number;
+  snapshotActive: boolean;
+  aggressiveQualityActive: boolean;
+  coarseWaterUsed: boolean;
+  zoomByteSamples: VectorPerfZoomBytes[];
+};
+
 export type CsvBounds = {
   min_lat: number;
   min_lon: number;
@@ -184,6 +238,12 @@ export type WorkerInMessage =
       };
     }
   | {
+      type: "SET_DEBUG_OPTIONS";
+      payload: {
+        perfOverlayEnabled?: boolean;
+      };
+    }
+  | {
       type: "LOAD_TRAJECTORY_CSV";
       payload: {
         name: string;
@@ -253,6 +313,12 @@ export type WorkerOutMessage =
       type: "STATUS";
       payload: {
         phase: "loading" | "ready";
+      };
+    }
+  | {
+      type: "PERF_STATS";
+      payload: {
+        stats: VectorPerfStats | null;
       };
     }
   | {

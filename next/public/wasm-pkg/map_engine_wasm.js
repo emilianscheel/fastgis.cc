@@ -1,5 +1,5 @@
 /* @ts-self-types="./map_engine_wasm.d.ts" */
-import { fetchTileBitmap, fetchTileBytes, sampleTileEdgeColors } from './snippets/map-engine-wasm-c5fe8788d5fdbb58/inline0.js';
+import { cancelTileBytesRequest, fetchTileBitmap, fetchTileBytesManaged, sampleTileEdgeColors } from './snippets/map-engine-wasm-c5fe8788d5fdbb58/inline0.js';
 
 export class MapEngine {
     static __wrap(ptr) {
@@ -191,6 +191,12 @@ export class MapEngine {
         wasm.mapengine_resize(this.__wbg_ptr, width, height, dpr);
     }
     /**
+     * @param {boolean} _enabled
+     */
+    set_perf_debug_enabled(_enabled) {
+        wasm.mapengine_set_perf_debug_enabled(this.__wbg_ptr, _enabled);
+    }
+    /**
      * @param {string} template
      */
     set_tile_url_template(template) {
@@ -205,6 +211,16 @@ export class MapEngine {
      */
     set_view(lon, lat, zoom) {
         wasm.mapengine_set_view(this.__wbg_ptr, lon, lat, zoom);
+    }
+    /**
+     * @returns {any}
+     */
+    take_perf_stats_json() {
+        const ret = wasm.mapengine_take_perf_stats_json(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * @param {number} delta_y
@@ -406,7 +422,7 @@ export class VectorMapEngine {
      * @param {number} _count
      */
     remove_recent_markers(_count) {
-        wasm.vectormapengine_remove_recent_markers(this.__wbg_ptr, _count);
+        wasm.mapengine_set_perf_debug_enabled(this.__wbg_ptr, _count);
     }
     /**
      * @param {number} width
@@ -415,6 +431,12 @@ export class VectorMapEngine {
      */
     resize(width, height, dpr) {
         wasm.vectormapengine_resize(this.__wbg_ptr, width, height, dpr);
+    }
+    /**
+     * @param {boolean} enabled
+     */
+    set_perf_debug_enabled(enabled) {
+        wasm.vectormapengine_set_perf_debug_enabled(this.__wbg_ptr, enabled);
     }
     /**
      * @param {string} template
@@ -431,6 +453,16 @@ export class VectorMapEngine {
      */
     set_view(lon, lat, zoom) {
         wasm.vectormapengine_set_view(this.__wbg_ptr, lon, lat, zoom);
+    }
+    /**
+     * @returns {any}
+     */
+    take_perf_stats_json() {
+        const ret = wasm.vectormapengine_take_perf_stats_json(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * @param {number} delta_y
@@ -562,6 +594,9 @@ function __wbg_get_imports() {
         __wbg__wbg_cb_unref_d9b87ff7982e3b21: function(arg0) {
             arg0._wbg_cb_unref();
         },
+        __wbg_activeTexture_6f9a710514686c24: function(arg0, arg1) {
+            arg0.activeTexture(arg1 >>> 0);
+        },
         __wbg_arc_60bf829e1bd2add5: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4, arg5) {
             arg0.arc(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
@@ -583,6 +618,9 @@ function __wbg_get_imports() {
         __wbg_bindBuffer_c9068e8712a034f5: function(arg0, arg1, arg2) {
             arg0.bindBuffer(arg1 >>> 0, arg2);
         },
+        __wbg_bindTexture_b2b7b1726a83f93e: function(arg0, arg1, arg2) {
+            arg0.bindTexture(arg1 >>> 0, arg2);
+        },
         __wbg_bufferData_98f6c413a8f0f139: function(arg0, arg1, arg2, arg3) {
             arg0.bufferData(arg1 >>> 0, arg2, arg3 >>> 0);
         },
@@ -590,6 +628,10 @@ function __wbg_get_imports() {
             const ret = arg0.call(arg1);
             return ret;
         }, arguments); },
+        __wbg_cancelTileBytesRequest_a0ac8d9f492c062c: function(arg0) {
+            const ret = cancelTileBytesRequest(arg0 >>> 0);
+            return ret;
+        },
         __wbg_clearColor_404a3b16d43db93b: function(arg0, arg1, arg2, arg3, arg4) {
             arg0.clearColor(arg1, arg2, arg3, arg4);
         },
@@ -598,6 +640,9 @@ function __wbg_get_imports() {
         },
         __wbg_compileShader_94718a93495d565d: function(arg0, arg1) {
             arg0.compileShader(arg1);
+        },
+        __wbg_copyTexImage2D_07e641a3bc0c30e2: function(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
+            arg0.copyTexImage2D(arg1 >>> 0, arg2, arg3 >>> 0, arg4, arg5, arg6, arg7, arg8);
         },
         __wbg_createBuffer_26534c05e01b8559: function(arg0) {
             const ret = arg0.createBuffer();
@@ -609,6 +654,10 @@ function __wbg_get_imports() {
         },
         __wbg_createShader_e3ac08ed8c5b14b2: function(arg0, arg1) {
             const ret = arg0.createShader(arg1 >>> 0);
+            return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
+        __wbg_createTexture_16d2c8a3d7d4a75a: function(arg0) {
+            const ret = arg0.createTexture();
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         },
         __wbg_disable_7fe6fb3e97717f88: function(arg0, arg1) {
@@ -662,13 +711,13 @@ function __wbg_get_imports() {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
             }
         }, arguments); },
-        __wbg_fetchTileBytes_568c388bbab115f6: function() { return handleError(function (arg0, arg1) {
+        __wbg_fetchTileBytesManaged_d151dc55ffb7ac2b: function() { return handleError(function (arg0, arg1, arg2) {
             let deferred0_0;
             let deferred0_1;
             try {
                 deferred0_0 = arg0;
                 deferred0_1 = arg1;
-                const ret = fetchTileBytes(getStringFromWasm0(arg0, arg1));
+                const ret = fetchTileBytesManaged(getStringFromWasm0(arg0, arg1), arg2 >>> 0);
                 return ret;
             } finally {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
@@ -862,6 +911,10 @@ function __wbg_get_imports() {
             const ret = new Object();
             return ret;
         },
+        __wbg_new_3eb36ae241fe6f44: function() {
+            const ret = new Array();
+            return ret;
+        },
         __wbg_new_8a6f238a6ece86ea: function() {
             const ret = new Error();
             return ret;
@@ -884,6 +937,10 @@ function __wbg_get_imports() {
         }, arguments); },
         __wbg_next_418f80d8f5303233: function(arg0) {
             const ret = arg0.next;
+            return ret;
+        },
+        __wbg_now_a3af9a2f4bbaa4d1: function() {
+            const ret = Date.now();
             return ret;
         },
         __wbg_prototypesetcall_bdcdcc5842e4d77d: function(arg0, arg1, arg2) {
@@ -915,6 +972,9 @@ function __wbg_get_imports() {
         }, arguments); },
         __wbg_set_3f1d0b984ed272ed: function(arg0, arg1, arg2) {
             arg0[arg1] = arg2;
+        },
+        __wbg_set_f43e577aea94465b: function(arg0, arg1, arg2) {
+            arg0[arg1 >>> 0] = arg2;
         },
         __wbg_set_fillStyle_783d3f7489475421: function(arg0, arg1, arg2) {
             arg0.fillStyle = getStringFromWasm0(arg1, arg2);
@@ -984,6 +1044,9 @@ function __wbg_get_imports() {
         __wbg_stroke_8b312cfadb48613c: function(arg0) {
             arg0.stroke();
         },
+        __wbg_texParameteri_0d45be2c88d6bad8: function(arg0, arg1, arg2, arg3) {
+            arg0.texParameteri(arg1 >>> 0, arg2 >>> 0, arg3);
+        },
         __wbg_then_0d9fe2c7b1857d32: function(arg0, arg1, arg2) {
             const ret = arg0.then(arg1, arg2);
             return ret;
@@ -994,6 +1057,9 @@ function __wbg_get_imports() {
         },
         __wbg_uniform1f_b500ede5b612bea2: function(arg0, arg1, arg2) {
             arg0.uniform1f(arg1, arg2);
+        },
+        __wbg_uniform1i_e9aee4b9e7fe8c4b: function(arg0, arg1, arg2) {
+            arg0.uniform1i(arg1, arg2);
         },
         __wbg_uniform2f_1887b1268f65bfee: function(arg0, arg1, arg2, arg3) {
             arg0.uniform2f(arg1, arg2, arg3);

@@ -58,6 +58,34 @@ export async function fetchTileBytes(url) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+const __vectorTileFetchControllers = new Map();
+
+export async function fetchTileBytesManaged(url, requestId) {
+  const controller = new AbortController();
+  __vectorTileFetchControllers.set(requestId, controller);
+  try {
+    const response = await fetch(url, {
+      mode: "cors",
+      credentials: "omit",
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      throw new Error(`Tile request failed with status ${response.status}`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  } finally {
+    __vectorTileFetchControllers.delete(requestId);
+  }
+}
+
+export function cancelTileBytesRequest(requestId) {
+  const controller = __vectorTileFetchControllers.get(requestId);
+  if (!controller) return false;
+  __vectorTileFetchControllers.delete(requestId);
+  controller.abort();
+  return true;
+}
+
 export function webgpuSupported() {
   return typeof navigator !== "undefined" && !!navigator.gpu;
 }

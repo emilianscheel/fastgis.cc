@@ -16,6 +16,7 @@ export async function GET(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> | { path: string[] } }
 ): Promise<Response> {
+  const routeStartedAt = performance.now();
   const resolvedParams = await Promise.resolve(context.params);
   const pathParts = resolvedParams.path ?? [];
 
@@ -35,7 +36,9 @@ export async function GET(
   upstreamUrl.search = request.nextUrl.search;
 
   let upstream: Response;
+  let upstreamFetchMs = 0;
   try {
+    const upstreamFetchStartedAt = performance.now();
     upstream = await fetch(upstreamUrl, {
       method: "GET",
       headers: {
@@ -43,6 +46,7 @@ export async function GET(
       },
       cache: "force-cache"
     });
+    upstreamFetchMs = performance.now() - upstreamFetchStartedAt;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Upstream fetch failed.";
     return badRequest(message, 502);
@@ -66,6 +70,12 @@ export async function GET(
   if (lastModified) {
     headers.set("last-modified", lastModified);
   }
+  headers.set("x-proxy-cache", "pass");
+  const totalMs = performance.now() - routeStartedAt;
+  headers.set(
+    "server-timing",
+    `proxy_upstream;dur=${upstreamFetchMs.toFixed(1)}, proxy_total;dur=${totalMs.toFixed(1)}`
+  );
 
   return new Response(upstream.body, {
     status: upstream.status,
@@ -73,4 +83,3 @@ export async function GET(
     headers
   });
 }
-

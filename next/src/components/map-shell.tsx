@@ -18,7 +18,7 @@ import { useMapEngineRuntime, type BasemapStyleConfig } from "@/hooks/use-map-en
 import { useZoomShortcuts } from "@/hooks/use-zoom-shortcuts";
 import { appToast } from "@/lib/app-toast";
 import { dispatchScannedImport, scanImportFile } from "@/lib/import";
-import type { PlacedMarker, ProjectedPoint } from "@/lib/map-protocol";
+import type { PerfTimingSeries, PlacedMarker, ProjectedPoint, VectorPerfStats } from "@/lib/map-protocol";
 
 type RasterMapStyle = MapStyleOption & {
   engineKind: "raster";
@@ -234,6 +234,37 @@ function getMapStyleById(id: MapStyle["id"]): MapStyle {
   return MAP_STYLES.find((style) => style.id === id) ?? MAP_STYLES[0];
 }
 
+function formatPerfMs(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+  return value >= 100 ? value.toFixed(0) : value.toFixed(1);
+}
+
+function formatPerfSeries(series: PerfTimingSeries | null | undefined): string {
+  if (!series) return "-";
+  return `${formatPerfMs(series.p50Ms)}/${formatPerfMs(series.p95Ms)} ms`;
+}
+
+function formatPerfBytesPerSec(bytesPerSec: number | null | undefined): string {
+  if (typeof bytesPerSec !== "number" || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) {
+    return "-";
+  }
+  if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(2)} MB/s`;
+  if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+  return `${bytesPerSec.toFixed(0)} B/s`;
+}
+
+function currentZoomByteSample(stats: VectorPerfStats | null): string {
+  if (!stats) return "-";
+  const sample = stats.zoomByteSamples.find((entry) => entry.z === stats.fetchZoom);
+  if (!sample) return "-";
+  const bytes = sample.avgTileBytes;
+  if (!Number.isFinite(bytes) || bytes <= 0) return "-";
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes.toFixed(0)} B`;
+}
+
 function toBasemapStyleConfig(style: MapStyle): BasemapStyleConfig {
   if (style.engineKind === "raster") {
     return {
@@ -255,6 +286,7 @@ export function MapShell() {
 
   const [isMounted, setIsMounted] = useState(false);
   const [mapStyleId, setMapStyleId] = useState<MapStyle["id"]>(LIGHT_THEME_MAP_STYLE_ID);
+  const [showPerfOverlay, setShowPerfOverlay] = useState(false);
   const selectedMapStyle = useMemo(() => getMapStyleById(mapStyleId), [mapStyleId]);
   const selectedBasemapStyle = useMemo(
     () => toBasemapStyleConfig(selectedMapStyle),
@@ -302,13 +334,33 @@ export function MapShell() {
     loadTrajectoryCsv,
     loadMarkerCsv,
     getViewState,
-    activeEngineKind
+    perfDebugEnabled,
+    perfStats,
+    setPerfDebugEnabled,
+    activeEngineKind,
+    readyDiagnostics
   } = useMapEngineRuntime({
     basemapStyle: selectedBasemapStyle,
     baseMapConfig: BASE_MAP_CONFIG
   });
   const isVectorStyleSelected = selectedMapStyle.engineKind === "vector";
   const isVectorEngineActive = activeEngineKind === "vector";
+
+  useEffect(() => {
+    setPerfDebugEnabled(showPerfOverlay);
+  }, [setPerfDebugEnabled, showPerfOverlay]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.shiftKey && (event.key === "P" || event.key === "p"))) {
+        return;
+      }
+      event.preventDefault();
+      setShowPerfOverlay((prev) => !prev);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const zoomAnimationRef = useRef<number | null>(null);
 
@@ -1037,6 +1089,72 @@ export function MapShell() {
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
       />
+      <div className="pointer-events-none fixed bottom-4 left-4 z-40 flex flex-col items-start gap-2">
+        <button
+          type="button"
+          className="pointer-events-auto rounded-md border border-black/10 bg-background/85 px-2 py-1 text-xs text-foreground shadow-sm backdrop-blur"
+          onClick={() => setShowPerfOverlay((prev) => !prev)}
+        >
+          Perf {showPerfOverlay ? "On" : "Off"}
+        </button>
+        {showPerfOverlay ? (
+          <div className="pointer-events-auto w-[320px] rounded-lg border border-black/10 bg-background/90 p-3 text-xs text-foreground shadow-lg backdrop-blur">
+            <div className="mb-2 flex items-center justify-between font-medium">
+              <span>Vector Perf</span>
+              <span className="font-mono text-[11px] opacity-70">
+                {readyDiagnostics.mode}/{readyDiagnostics.backend}
+              </span>
+            </div>
+            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono text-[11px]">
+              <span className="opacity-70">overlay</span>
+              <span>{perfDebugEnabled ? "enabled" : "disabled"}</span>
+              <span className="opacity-70">frame p50/p95</span>
+              <span>{formatPerfSeries(perfStats?.frame)}</span>
+              <span className="opacity-70">full draw p50/p95</span>
+              <span>{formatPerfSeries(perfStats?.fullDraw)}</span>
+              <span className="opacity-70">snapshot p50/p95</span>
+              <span>{formatPerfSeries(perfStats?.snapshotDraw)}</span>
+              <span className="opacity-70">fetch p50/p95</span>
+              <span>{formatPerfSeries(perfStats?.fetch)}</span>
+              <span className="opacity-70">decode p50/p95</span>
+              <span>{formatPerfSeries(perfStats?.decode)}</span>
+              <span className="opacity-70">prepare p50/p95</span>
+              <span>{formatPerfSeries(perfStats?.prepare)}</span>
+              <span className="opacity-70">upload p50/p95</span>
+              <span>{formatPerfSeries(perfStats?.glUpload)}</span>
+              <span className="opacity-70">snapshot ratio</span>
+              <span>{typeof perfStats?.snapshotRatio === "number" ? `${(perfStats.snapshotRatio * 100).toFixed(0)}%` : "-"}</span>
+              <span className="opacity-70">q/pending/inflight</span>
+              <span>
+                {perfStats
+                  ? `${perfStats.queueHigh}/${perfStats.queueMedium}/${perfStats.queueLow} • ${perfStats.pending}/${perfStats.inFlight}`
+                  : "-"}
+              </span>
+              <span className="opacity-70">decode backlog</span>
+              <span>{perfStats ? String(perfStats.decodeBacklog) : "-"}</span>
+              <span className="opacity-70">draw cmds (t/f)</span>
+              <span>{perfStats ? `${perfStats.targetDrawCommands}/${perfStats.fallbackDrawCommands}` : "-"}</span>
+              <span className="opacity-70">verts (w/l)</span>
+              <span>{perfStats ? `${perfStats.waterVerticesDrawn}/${perfStats.lineVerticesDrawn}` : "-"}</span>
+              <span className="opacity-70">fetch zoom</span>
+              <span>{perfStats ? String(perfStats.fetchZoom) : "-"}</span>
+              <span className="opacity-70">net recent</span>
+              <span>{formatPerfBytesPerSec(perfStats?.recentFetchBytesPerSec)}</span>
+              <span className="opacity-70">avg tile @z</span>
+              <span>{currentZoomByteSample(perfStats)}</span>
+              <span className="opacity-70">stale/cancel</span>
+              <span>{perfStats ? `${perfStats.staleResultDrops}/${perfStats.canceledRequests}` : "-"}</span>
+              <span className="opacity-70">mode flags</span>
+              <span>
+                {perfStats
+                  ? `${perfStats.snapshotActive ? "snap" : "full"} · ${perfStats.aggressiveQualityActive ? "aggr" : "norm"} · ${perfStats.coarseWaterUsed ? "coarse" : "full"}`
+                  : "-"}
+              </span>
+            </div>
+            <div className="mt-2 text-[10px] opacity-60">Toggle with Shift+P</div>
+          </div>
+        ) : null}
+      </div>
     </main>
   );
 }

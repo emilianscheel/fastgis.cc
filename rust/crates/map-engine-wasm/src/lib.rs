@@ -1,4 +1,4 @@
-use js_sys::{Array, Float32Array, Uint8Array};
+use js_sys::{Array, Date, Float32Array, Uint8Array};
 use map_core::{
     clamp_lat, lon_lat_to_world, marker_bounds, normalize_lon, parse_marker_csv,
     parse_trajectory_csv, trajectory_bounds, world_to_lon_lat, Bounds, MarkerPoint,
@@ -15,7 +15,7 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{
     CanvasRenderingContext2d, HtmlCanvasElement, ImageBitmap, OffscreenCanvas,
     OffscreenCanvasRenderingContext2d, WebGl2RenderingContext, WebGlBuffer, WebGlProgram,
-    WebGlShader, WebGlUniformLocation,
+    WebGlShader, WebGlTexture, WebGlUniformLocation,
 };
 use earcutr::earcut;
 
@@ -33,6 +33,20 @@ const VECTOR_COARSE_WATER_TILE_SIZE_FALLBACK_CSS_PX: f64 = 560.0;
 const VECTOR_COARSE_WATER_SIMPLIFY_TOLERANCE: f32 = 0.0045;
 const VECTOR_COARSE_WATER_MIN_POLYGON_POINTS: usize = 24;
 const VECTOR_COARSE_WATER_MIN_SAVINGS_RATIO: f32 = 0.15;
+const VECTOR_ZOOM_SNAPSHOT_ACTIVE_WINDOW_MS: f64 = 140.0;
+const VECTOR_ZOOM_SNAPSHOT_MAX_FULL_REDRAW_INTERVAL_MS: f64 = 55.0;
+const VECTOR_ZOOM_SNAPSHOT_MAX_AGE_MS: f64 = 800.0;
+const VECTOR_DYNAMIC_RES_ACTIVE_WINDOW_MS: f64 = 180.0;
+const VECTOR_DYNAMIC_RES_MIN_EFFECTIVE_DPR: f64 = 0.6;
+const VECTOR_DYNAMIC_RES_LOW_ZOOM_MAX_EFFECTIVE_DPR: f64 = 0.75;
+const VECTOR_DYNAMIC_RES_MID_ZOOM_MAX_EFFECTIVE_DPR: f64 = 0.9;
+const VECTOR_PERF_SERIES_CAPACITY: usize = 96;
+const VECTOR_PERF_FETCH_BYTES_WINDOW_MS: f64 = 5_000.0;
+const VECTOR_PERF_DEFAULT_DECODE_BUDGET_MS: f64 = 8.0;
+const VECTOR_PERF_ACTIVE_ZOOM_DECODE_BUDGET_MS: f64 = 3.0;
+const VECTOR_PERF_AGGRESSIVE_ZOOM_DECODE_BUDGET_MS: f64 = 2.0;
+const VECTOR_PERF_AGGRESSIVE_PENDING_THRESHOLD: usize = 24;
+const VECTOR_PERF_AGGRESSIVE_DECODE_BACKLOG_THRESHOLD: usize = 8;
 const TRAJECTORY_FIT_PADDING: f64 = 0.8;
 const VIEW_ANIMATION_DURATION_MS: f64 = 300.0;
 const LOCATION_MARKER_HEAD_RADIUS_PX: f64 = 8.0;
@@ -106,6 +120,34 @@ export async function fetchTileBytes(url) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+const __vectorTileFetchControllers = new Map();
+
+export async function fetchTileBytesManaged(url, requestId) {
+  const controller = new AbortController();
+  __vectorTileFetchControllers.set(requestId, controller);
+  try {
+    const response = await fetch(url, {
+      mode: "cors",
+      credentials: "omit",
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      throw new Error(`Tile request failed with status ${response.status}`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  } finally {
+    __vectorTileFetchControllers.delete(requestId);
+  }
+}
+
+export function cancelTileBytesRequest(requestId) {
+  const controller = __vectorTileFetchControllers.get(requestId);
+  if (!controller) return false;
+  __vectorTileFetchControllers.delete(requestId);
+  controller.abort();
+  return true;
+}
+
 export function webgpuSupported() {
   return typeof navigator !== "undefined" && !!navigator.gpu;
 }
@@ -119,6 +161,12 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_name = fetchTileBytes)]
     async fn fetch_tile_bytes(url: String) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(catch, js_name = fetchTileBytesManaged)]
+    async fn fetch_tile_bytes_managed(url: String, request_id: u32) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_name = cancelTileBytesRequest)]
+    fn cancel_tile_bytes_request(request_id: u32) -> bool;
 
     #[wasm_bindgen(js_name = webgpuSupported)]
     fn webgpu_supported() -> bool;
@@ -177,7 +225,7 @@ struct CachedTile {
     last_used: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestPriority {
     High,
     Medium,
@@ -188,6 +236,10 @@ enum RequestPriority {
 struct TileEdgeSample {
     top_rgb: [f64; 3],
     bottom_rgb: [f64; 3],
+}
+
+fn now_ms() -> f64 {
+    Date::now()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1585,6 +1637,29 @@ struct SimpleGlPainter {
 }
 
 #[derive(Clone)]
+struct SnapshotGlPainter {
+    program: WebGlProgram,
+    dest_origin_uniform: WebGlUniformLocation,
+    dest_size_uniform: WebGlUniformLocation,
+    viewport_uniform: WebGlUniformLocation,
+    dpr_uniform: WebGlUniformLocation,
+    texture_uniform: WebGlUniformLocation,
+}
+
+#[derive(Clone)]
+struct WebGlFrameSnapshot {
+    texture: WebGlTexture,
+    pixel_width: i32,
+    pixel_height: i32,
+    css_width: f64,
+    css_height: f64,
+    center_lon: f64,
+    center_lat: f64,
+    zoom: f64,
+    captured_at_ms: f64,
+}
+
+#[derive(Clone)]
 struct TileGlBuffers {
     water_buffer: Option<WebGlBuffer>,
     water_vertex_count: i32,
@@ -1813,6 +1888,93 @@ void main() {
         tile_size_uniform,
         viewport_uniform,
         dpr_uniform,
+    })
+}
+
+fn create_snapshot_gl_painter(gl: &WebGl2RenderingContext) -> Result<SnapshotGlPainter, JsValue> {
+    let vertex_shader = compile_gl_shader(
+        gl,
+        WebGl2RenderingContext::VERTEX_SHADER,
+        r#"#version 300 es
+uniform vec2 u_dest_origin;
+uniform vec2 u_dest_size;
+uniform vec2 u_viewport_px;
+uniform float u_dpr;
+out vec2 v_uv;
+void main() {
+  vec2 corners[4] = vec2[](
+    vec2(0.0, 0.0),
+    vec2(1.0, 0.0),
+    vec2(0.0, 1.0),
+    vec2(1.0, 1.0)
+  );
+  vec2 p = corners[gl_VertexID];
+  vec2 screen_css = u_dest_origin + p * u_dest_size;
+  vec2 px = screen_css * u_dpr;
+  vec2 ndc = vec2(
+    (px.x / u_viewport_px.x) * 2.0 - 1.0,
+    1.0 - (px.y / u_viewport_px.y) * 2.0
+  );
+  gl_Position = vec4(ndc, 0.0, 1.0);
+  v_uv = vec2(p.x, 1.0 - p.y);
+}"#,
+    )?;
+    let fragment_shader = compile_gl_shader(
+        gl,
+        WebGl2RenderingContext::FRAGMENT_SHADER,
+        r#"#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+in vec2 v_uv;
+out vec4 outColor;
+void main() {
+  outColor = texture(u_tex, v_uv);
+}"#,
+    )?;
+
+    let program = gl
+        .create_program()
+        .ok_or_else(|| JsValue::from_str("Failed to create WebGL snapshot program"))?;
+    gl.attach_shader(&program, &vertex_shader);
+    gl.attach_shader(&program, &fragment_shader);
+    gl.link_program(&program);
+
+    let status = gl
+        .get_program_parameter(&program, WebGl2RenderingContext::LINK_STATUS)
+        .as_bool()
+        .unwrap_or(false);
+    if !status {
+        let log = gl
+            .get_program_info_log(&program)
+            .unwrap_or_else(|| "Unknown program link error".to_string());
+        return Err(JsValue::from_str(&format!(
+            "WebGL snapshot program link failed: {log}"
+        )));
+    }
+
+    let dest_origin_uniform = gl
+        .get_uniform_location(&program, "u_dest_origin")
+        .ok_or_else(|| JsValue::from_str("Missing snapshot uniform u_dest_origin"))?;
+    let dest_size_uniform = gl
+        .get_uniform_location(&program, "u_dest_size")
+        .ok_or_else(|| JsValue::from_str("Missing snapshot uniform u_dest_size"))?;
+    let viewport_uniform = gl
+        .get_uniform_location(&program, "u_viewport_px")
+        .ok_or_else(|| JsValue::from_str("Missing snapshot uniform u_viewport_px"))?;
+    let dpr_uniform = gl
+        .get_uniform_location(&program, "u_dpr")
+        .ok_or_else(|| JsValue::from_str("Missing snapshot uniform u_dpr"))?;
+    let texture_uniform = gl
+        .get_uniform_location(&program, "u_tex")
+        .ok_or_else(|| JsValue::from_str("Missing snapshot uniform u_tex"))?;
+
+    Ok(SnapshotGlPainter {
+        program,
+        dest_origin_uniform,
+        dest_size_uniform,
+        viewport_uniform,
+        dpr_uniform,
+        texture_uniform,
     })
 }
 
@@ -2443,14 +2605,278 @@ struct VectorGlTileDrawCommand {
     prefer_coarse_water: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct InFlightVectorRequest {
+    request_id: u32,
+    key: TileKey,
+    priority: RequestPriority,
+    generation: u64,
+    started_at_ms: f64,
+}
+
+struct PendingDecodeTile {
+    key: TileKey,
+    bytes: Vec<u8>,
+    priority: RequestPriority,
+    generation: u64,
+    request_url: String,
+}
+
+#[derive(Default)]
+struct RollingPerfSeries {
+    values: VecDeque<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RollingPerfSeriesSnapshot {
+    samples: usize,
+    last_ms: Option<f64>,
+    avg_ms: Option<f64>,
+    p50_ms: Option<f64>,
+    p95_ms: Option<f64>,
+    max_ms: Option<f64>,
+}
+
+impl RollingPerfSeries {
+    fn record(&mut self, value: f64) {
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+        self.values.push_back(value);
+        while self.values.len() > VECTOR_PERF_SERIES_CAPACITY {
+            self.values.pop_front();
+        }
+    }
+
+    fn snapshot(&self) -> RollingPerfSeriesSnapshot {
+        if self.values.is_empty() {
+            return RollingPerfSeriesSnapshot {
+                samples: 0,
+                last_ms: None,
+                avg_ms: None,
+                p50_ms: None,
+                p95_ms: None,
+                max_ms: None,
+            };
+        }
+
+        let mut sorted: Vec<f64> = self.values.iter().copied().collect();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let samples = sorted.len();
+        let sum: f64 = sorted.iter().sum();
+        let p50_index = ((samples.saturating_sub(1)) as f64 * 0.5).round() as usize;
+        let p95_index = ((samples.saturating_sub(1)) as f64 * 0.95).round() as usize;
+
+        RollingPerfSeriesSnapshot {
+            samples,
+            last_ms: self.values.back().copied(),
+            avg_ms: Some(sum / samples as f64),
+            p50_ms: sorted.get(p50_index).copied(),
+            p95_ms: sorted.get(p95_index).copied(),
+            max_ms: sorted.last().copied(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct VectorPerfTelemetry {
+    enabled: bool,
+    frame_ms: RollingPerfSeries,
+    full_draw_ms: RollingPerfSeries,
+    snapshot_draw_ms: RollingPerfSeries,
+    fetch_ms: RollingPerfSeries,
+    decode_ms: RollingPerfSeries,
+    prepare_ms: RollingPerfSeries,
+    gl_upload_ms: RollingPerfSeries,
+    frames: u64,
+    full_redraw_frames: u64,
+    snapshot_surrogate_frames: u64,
+    stale_result_drops: u64,
+    canceled_requests: u64,
+    fetch_errors: u64,
+    decode_errors: u64,
+    decode_queue_drops: u64,
+    bytes_fetched_total: u64,
+    tiles_fetched_total: u64,
+    recent_fetch_bytes: VecDeque<(f64, u32)>,
+    bytes_by_zoom: [u64; 25],
+    tiles_by_zoom: [u32; 25],
+    last_visible_tile_count: u32,
+    last_target_draw_commands: u32,
+    last_fallback_draw_commands: u32,
+    last_water_vertices_drawn: u32,
+    last_line_vertices_drawn: u32,
+    last_queue_high: u32,
+    last_queue_medium: u32,
+    last_queue_low: u32,
+    last_pending: u32,
+    last_in_flight: u32,
+    last_decode_backlog: u32,
+    last_fetch_zoom: u8,
+    last_snapshot_active: bool,
+    last_aggressive_quality: bool,
+    last_full_draw_used_coarse_water: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VectorPerfZoomBytes {
+    z: u8,
+    avg_tile_bytes: f64,
+    tiles: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VectorPerfStatsSnapshot {
+    enabled: bool,
+    frames: u64,
+    full_redraw_frames: u64,
+    snapshot_surrogate_frames: u64,
+    snapshot_ratio: f64,
+    stale_result_drops: u64,
+    canceled_requests: u64,
+    fetch_errors: u64,
+    decode_errors: u64,
+    decode_queue_drops: u64,
+    bytes_fetched_total: u64,
+    tiles_fetched_total: u64,
+    recent_fetch_bytes_per_sec: f64,
+    frame: RollingPerfSeriesSnapshot,
+    full_draw: RollingPerfSeriesSnapshot,
+    snapshot_draw: RollingPerfSeriesSnapshot,
+    fetch: RollingPerfSeriesSnapshot,
+    decode: RollingPerfSeriesSnapshot,
+    prepare: RollingPerfSeriesSnapshot,
+    gl_upload: RollingPerfSeriesSnapshot,
+    visible_tile_count: u32,
+    target_draw_commands: u32,
+    fallback_draw_commands: u32,
+    water_vertices_drawn: u32,
+    line_vertices_drawn: u32,
+    queue_high: u32,
+    queue_medium: u32,
+    queue_low: u32,
+    pending: u32,
+    in_flight: u32,
+    decode_backlog: u32,
+    fetch_zoom: u8,
+    snapshot_active: bool,
+    aggressive_quality_active: bool,
+    coarse_water_used: bool,
+    zoom_byte_samples: Vec<VectorPerfZoomBytes>,
+}
+
+impl VectorPerfTelemetry {
+    fn prune_recent_fetch_bytes(&mut self, now_ms: f64) {
+        while let Some((ts, _)) = self.recent_fetch_bytes.front() {
+            if now_ms - *ts <= VECTOR_PERF_FETCH_BYTES_WINDOW_MS {
+                break;
+            }
+            self.recent_fetch_bytes.pop_front();
+        }
+    }
+
+    fn record_fetch_bytes(&mut self, now_ms: f64, z: u8, bytes: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.bytes_fetched_total = self.bytes_fetched_total.saturating_add(bytes as u64);
+        self.tiles_fetched_total = self.tiles_fetched_total.saturating_add(1);
+        self.recent_fetch_bytes
+            .push_back((now_ms, (bytes.min(u32::MAX as usize)) as u32));
+        self.prune_recent_fetch_bytes(now_ms);
+        let index = usize::from(z.min(24));
+        self.bytes_by_zoom[index] = self.bytes_by_zoom[index].saturating_add(bytes as u64);
+        self.tiles_by_zoom[index] = self.tiles_by_zoom[index].saturating_add(1);
+    }
+
+    fn recent_fetch_bytes_per_sec(&self) -> f64 {
+        let sum: u64 = self.recent_fetch_bytes.iter().map(|(_, bytes)| u64::from(*bytes)).sum();
+        if sum == 0 {
+            0.0
+        } else {
+            sum as f64 / (VECTOR_PERF_FETCH_BYTES_WINDOW_MS / 1000.0)
+        }
+    }
+
+    fn zoom_byte_samples(&self) -> Vec<VectorPerfZoomBytes> {
+        let mut out = Vec::new();
+        for z in 0..=24u8 {
+            let index = usize::from(z);
+            let tiles = self.tiles_by_zoom[index];
+            if tiles == 0 {
+                continue;
+            }
+            out.push(VectorPerfZoomBytes {
+                z,
+                avg_tile_bytes: self.bytes_by_zoom[index] as f64 / f64::from(tiles),
+                tiles,
+            });
+        }
+        out
+    }
+
+    fn snapshot(&self) -> VectorPerfStatsSnapshot {
+        let snapshot_ratio = if self.frames == 0 {
+            0.0
+        } else {
+            self.snapshot_surrogate_frames as f64 / self.frames as f64
+        };
+
+        VectorPerfStatsSnapshot {
+            enabled: self.enabled,
+            frames: self.frames,
+            full_redraw_frames: self.full_redraw_frames,
+            snapshot_surrogate_frames: self.snapshot_surrogate_frames,
+            snapshot_ratio,
+            stale_result_drops: self.stale_result_drops,
+            canceled_requests: self.canceled_requests,
+            fetch_errors: self.fetch_errors,
+            decode_errors: self.decode_errors,
+            decode_queue_drops: self.decode_queue_drops,
+            bytes_fetched_total: self.bytes_fetched_total,
+            tiles_fetched_total: self.tiles_fetched_total,
+            recent_fetch_bytes_per_sec: self.recent_fetch_bytes_per_sec(),
+            frame: self.frame_ms.snapshot(),
+            full_draw: self.full_draw_ms.snapshot(),
+            snapshot_draw: self.snapshot_draw_ms.snapshot(),
+            fetch: self.fetch_ms.snapshot(),
+            decode: self.decode_ms.snapshot(),
+            prepare: self.prepare_ms.snapshot(),
+            gl_upload: self.gl_upload_ms.snapshot(),
+            visible_tile_count: self.last_visible_tile_count,
+            target_draw_commands: self.last_target_draw_commands,
+            fallback_draw_commands: self.last_fallback_draw_commands,
+            water_vertices_drawn: self.last_water_vertices_drawn,
+            line_vertices_drawn: self.last_line_vertices_drawn,
+            queue_high: self.last_queue_high,
+            queue_medium: self.last_queue_medium,
+            queue_low: self.last_queue_low,
+            pending: self.last_pending,
+            in_flight: self.last_in_flight,
+            decode_backlog: self.last_decode_backlog,
+            fetch_zoom: self.last_fetch_zoom,
+            snapshot_active: self.last_snapshot_active,
+            aggressive_quality_active: self.last_aggressive_quality,
+            coarse_water_used: self.last_full_draw_used_coarse_water,
+            zoom_byte_samples: self.zoom_byte_samples(),
+        }
+    }
+}
+
 struct VectorEngineState {
     surface: CanvasSurface,
     gl: Option<WebGl2RenderingContext>,
     painter: Option<SimpleGlPainter>,
+    snapshot_painter: Option<SnapshotGlPainter>,
     ctx2d: Option<RenderContext>,
     width: f64,
     height: f64,
+    native_dpr: f64,
     dpr: f64,
+    internal_resolution_scale: f64,
     tile_url_template: String,
     min_zoom: u8,
     max_zoom: u8,
@@ -2468,11 +2894,22 @@ struct VectorEngineState {
     high_priority_queue: VecDeque<TileKey>,
     medium_priority_queue: VecDeque<TileKey>,
     low_priority_queue: VecDeque<TileKey>,
+    decode_high_priority_queue: VecDeque<PendingDecodeTile>,
+    decode_medium_priority_queue: VecDeque<PendingDecodeTile>,
+    decode_low_priority_queue: VecDeque<PendingDecodeTile>,
+    next_request_id: u32,
+    request_generation: u64,
+    in_flight_request_by_id: HashMap<u32, InFlightVectorRequest>,
+    in_flight_request_id_by_tile: HashMap<TileKey, u32>,
     in_flight_requests: usize,
     max_in_flight_requests: usize,
     source_max_zoom: u8,
     backend_kind: VectorBackendKind,
     last_zoom_direction: i8,
+    frame_snapshot: Option<WebGlFrameSnapshot>,
+    last_wheel_zoom_input_ms: f64,
+    last_full_webgl_draw_ms: f64,
+    perf: VectorPerfTelemetry,
 }
 
 impl VectorEngineState {
@@ -2504,6 +2941,229 @@ impl VectorEngineState {
             fetch_zoom.saturating_sub(1),
             fetch_zoom.saturating_add(1).min(self.source_max_zoom),
         )
+    }
+
+    fn bump_request_generation(&mut self) {
+        self.request_generation = self.request_generation.saturating_add(1);
+    }
+
+    fn set_perf_debug_enabled(&mut self, enabled: bool) {
+        self.perf.enabled = enabled;
+    }
+
+    fn take_perf_stats_js_value(&self) -> Result<JsValue, JsValue> {
+        if !self.perf.enabled {
+            return Ok(JsValue::NULL);
+        }
+        serde_wasm_bindgen::to_value(&self.perf.snapshot()).map_err(Into::into)
+    }
+
+    fn decode_backlog_len(&self) -> usize {
+        self.decode_high_priority_queue.len()
+            + self.decode_medium_priority_queue.len()
+            + self.decode_low_priority_queue.len()
+    }
+
+    fn update_perf_queue_snapshot(&mut self) {
+        if !self.perf.enabled {
+            return;
+        }
+        self.perf.last_queue_high = self.high_priority_queue.len().min(u32::MAX as usize) as u32;
+        self.perf.last_queue_medium = self
+            .medium_priority_queue
+            .len()
+            .min(u32::MAX as usize) as u32;
+        self.perf.last_queue_low = self.low_priority_queue.len().min(u32::MAX as usize) as u32;
+        self.perf.last_pending = self.pending_tiles.len().min(u32::MAX as usize) as u32;
+        self.perf.last_in_flight = self.in_flight_requests.min(u32::MAX as usize) as u32;
+        self.perf.last_decode_backlog = self.decode_backlog_len().min(u32::MAX as usize) as u32;
+    }
+
+    fn next_vector_request_id(&mut self) -> u32 {
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        id
+    }
+
+    fn register_in_flight_request(
+        &mut self,
+        key: TileKey,
+        priority: RequestPriority,
+        generation: u64,
+    ) -> InFlightVectorRequest {
+        let request = InFlightVectorRequest {
+            request_id: self.next_vector_request_id(),
+            key,
+            priority,
+            generation,
+            started_at_ms: now_ms(),
+        };
+        self.in_flight_request_id_by_tile.insert(key, request.request_id);
+        self.in_flight_request_by_id.insert(request.request_id, request);
+        self.in_flight_requests = self.in_flight_request_by_id.len();
+        self.update_perf_queue_snapshot();
+        request
+    }
+
+    fn finish_in_flight_request(&mut self, request_id: u32) -> Option<InFlightVectorRequest> {
+        let request = self.in_flight_request_by_id.remove(&request_id)?;
+        self.in_flight_request_id_by_tile.remove(&request.key);
+        self.in_flight_requests = self.in_flight_request_by_id.len();
+        self.update_perf_queue_snapshot();
+        Some(request)
+    }
+
+    fn cancel_in_flight_request(&mut self, request_id: u32) -> bool {
+        let Some(request) = self.in_flight_request_by_id.remove(&request_id) else {
+            return false;
+        };
+        self.in_flight_request_id_by_tile.remove(&request.key);
+        self.pending_tiles.remove(&request.key);
+        self.in_flight_requests = self.in_flight_request_by_id.len();
+        let _ = cancel_tile_bytes_request(request_id);
+        if self.perf.enabled {
+            self.perf.canceled_requests = self.perf.canceled_requests.saturating_add(1);
+            self.update_perf_queue_snapshot();
+        }
+        true
+    }
+
+    fn cancel_stale_in_flight_requests(&mut self) {
+        if self.in_flight_request_by_id.is_empty() {
+            return;
+        }
+        let (min_relevant_zoom, max_relevant_zoom) = self.relevant_fetch_zoom_bounds();
+        let aggressive = self.aggressive_zoom_out_quality_active(self.last_frame_now_ms);
+        let current_generation = self.request_generation;
+        let ids_to_cancel: Vec<u32> = self
+            .in_flight_request_by_id
+            .values()
+            .filter(|request| {
+                if request.key.z < min_relevant_zoom || request.key.z > max_relevant_zoom {
+                    return true;
+                }
+                if aggressive
+                    && request.priority == RequestPriority::Low
+                    && request.generation.saturating_add(1) < current_generation
+                {
+                    return true;
+                }
+                false
+            })
+            .map(|request| request.request_id)
+            .collect();
+
+        for request_id in ids_to_cancel {
+            let _ = self.cancel_in_flight_request(request_id);
+        }
+    }
+
+    fn enqueue_decode_tile(&mut self, job: PendingDecodeTile) {
+        match job.priority {
+            RequestPriority::High => self.decode_high_priority_queue.push_back(job),
+            RequestPriority::Medium => self.decode_medium_priority_queue.push_back(job),
+            RequestPriority::Low => self.decode_low_priority_queue.push_back(job),
+        }
+        self.update_perf_queue_snapshot();
+    }
+
+    fn dequeue_decode_tile(&mut self) -> Option<PendingDecodeTile> {
+        if let Some(job) = self.decode_high_priority_queue.pop_front() {
+            self.update_perf_queue_snapshot();
+            return Some(job);
+        }
+        if let Some(job) = self.decode_medium_priority_queue.pop_front() {
+            self.update_perf_queue_snapshot();
+            return Some(job);
+        }
+        let job = self.decode_low_priority_queue.pop_front();
+        if job.is_some() {
+            self.update_perf_queue_snapshot();
+        }
+        job
+    }
+
+    fn decode_budget_ms_for_frame(&self, now_ms: f64) -> f64 {
+        if self.aggressive_zoom_out_quality_active(now_ms) {
+            VECTOR_PERF_AGGRESSIVE_ZOOM_DECODE_BUDGET_MS
+        } else if self.dynamic_resolution_zoom_out_active(now_ms) {
+            VECTOR_PERF_ACTIVE_ZOOM_DECODE_BUDGET_MS
+        } else {
+            VECTOR_PERF_DEFAULT_DECODE_BUDGET_MS
+        }
+    }
+
+    fn process_decode_queue_budget(&mut self, frame_now_ms: f64) {
+        if self.decode_backlog_len() == 0 {
+            self.update_perf_queue_snapshot();
+            return;
+        }
+
+        let budget_ms = self.decode_budget_ms_for_frame(frame_now_ms);
+        let started_ms = now_ms();
+        let mut processed_any = false;
+
+        loop {
+            let elapsed = now_ms() - started_ms;
+            if processed_any && elapsed >= budget_ms {
+                break;
+            }
+
+            let Some(job) = self.dequeue_decode_tile() else {
+                break;
+            };
+
+            // If a tile became cached while bytes were queued for decode, drop the queued bytes.
+            if self.tile_cache.contains_key(&job.key) {
+                self.pending_tiles.remove(&job.key);
+                if self.perf.enabled {
+                    self.perf.decode_queue_drops = self.perf.decode_queue_drops.saturating_add(1);
+                }
+                processed_any = true;
+                continue;
+            }
+
+            let is_current_source = self.tile_url(job.key) == job.request_url;
+            let is_relevant_zoom = self.is_zoom_relevant_for_view(job.key.z);
+            let is_reasonably_current_generation =
+                job.generation.saturating_add(2) >= self.request_generation;
+            if !is_current_source || !is_relevant_zoom || !is_reasonably_current_generation {
+                self.pending_tiles.remove(&job.key);
+                if self.perf.enabled {
+                    self.perf.stale_result_drops = self.perf.stale_result_drops.saturating_add(1);
+                }
+                processed_any = true;
+                continue;
+            }
+
+            let decode_start = now_ms();
+            let decoded = decode_mvt_tile_scene(&job.bytes);
+            let decode_elapsed = now_ms() - decode_start;
+            if self.perf.enabled {
+                self.perf.decode_ms.record(decode_elapsed);
+            }
+            let Ok(scene) = decoded else {
+                self.pending_tiles.remove(&job.key);
+                if self.perf.enabled {
+                    self.perf.decode_errors = self.perf.decode_errors.saturating_add(1);
+                }
+                processed_any = true;
+                continue;
+            };
+
+            let prepare_start = now_ms();
+            let prepared_geometry = build_prepared_vector_tile_geometry(&scene, job.key.z <= 8);
+            let prepare_elapsed = now_ms() - prepare_start;
+            if self.perf.enabled {
+                self.perf.prepare_ms.record(prepare_elapsed);
+            }
+
+            self.insert_tile_scene_prepared(job.key, scene, prepared_geometry);
+            self.pending_tiles.remove(&job.key);
+            processed_any = true;
+        }
+
+        self.update_perf_queue_snapshot();
     }
 
     fn pop_latest_relevant_request(
@@ -2589,10 +3249,84 @@ impl VectorEngineState {
         }
     }
 
+    fn apply_internal_resolution_scale(&mut self, scale: f64) {
+        let scale = scale.clamp(0.25, 1.0);
+        if (self.internal_resolution_scale - scale).abs() < 0.01 && self.dpr > 0.0 {
+            return;
+        }
+
+        self.internal_resolution_scale = scale;
+        let min_effective = VECTOR_DYNAMIC_RES_MIN_EFFECTIVE_DPR.min(self.native_dpr.max(0.1));
+        self.dpr = (self.native_dpr * self.internal_resolution_scale)
+            .clamp(min_effective, self.native_dpr.max(min_effective));
+        self.frame_snapshot = None;
+
+        let pixel_width = (self.width * self.dpr).round().max(1.0) as u32;
+        let pixel_height = (self.height * self.dpr).round().max(1.0) as u32;
+        self.surface.set_pixel_size(pixel_width, pixel_height);
+        if let Some(gl) = &self.gl {
+            gl.viewport(0, 0, pixel_width as i32, pixel_height as i32);
+        }
+    }
+
+    fn dynamic_resolution_zoom_out_active(&self, now_ms: f64) -> bool {
+        if self.gl.is_none() {
+            return false;
+        }
+        if self.last_zoom_direction >= 0 {
+            return false;
+        }
+        if now_ms - self.last_wheel_zoom_input_ms > VECTOR_DYNAMIC_RES_ACTIVE_WINDOW_MS {
+            return false;
+        }
+        self.zoom_motion_active()
+    }
+
+    fn aggressive_zoom_out_quality_active(&self, now_ms: f64) -> bool {
+        if !self.dynamic_resolution_zoom_out_active(now_ms) {
+            return false;
+        }
+        self.decode_backlog_len() >= VECTOR_PERF_AGGRESSIVE_DECODE_BACKLOG_THRESHOLD
+            || self.pending_tiles.len() >= VECTOR_PERF_AGGRESSIVE_PENDING_THRESHOLD
+            || self.in_flight_requests >= self.max_in_flight_requests
+    }
+
+    fn desired_internal_resolution_scale_for_frame(&self, now_ms: f64) -> f64 {
+        if !self.dynamic_resolution_zoom_out_active(now_ms) {
+            return 1.0;
+        }
+
+        let fetch_zoom = self.current_fetch_zoom();
+        let mut max_effective_dpr = if fetch_zoom <= 3 {
+            VECTOR_DYNAMIC_RES_LOW_ZOOM_MAX_EFFECTIVE_DPR
+        } else if fetch_zoom <= 6 {
+            VECTOR_DYNAMIC_RES_MID_ZOOM_MAX_EFFECTIVE_DPR
+        } else {
+            1.0
+        };
+        if self.aggressive_zoom_out_quality_active(now_ms) {
+            max_effective_dpr *= if fetch_zoom <= 3 { 0.8 } else { 0.9 };
+        }
+
+        if self.native_dpr <= max_effective_dpr {
+            return 1.0;
+        }
+
+        (max_effective_dpr / self.native_dpr).clamp(0.25, 1.0)
+    }
+
+    fn update_internal_resolution_for_frame(&mut self, now_ms: f64) {
+        let desired = self.desired_internal_resolution_scale_for_frame(now_ms);
+        self.apply_internal_resolution_scale(desired);
+    }
+
     fn resize(&mut self, width: u32, height: u32, dpr: f32) {
         self.width = f64::from(width);
         self.height = f64::from(height);
-        self.dpr = f64::from(dpr.max(0.1));
+        self.native_dpr = f64::from(dpr.max(0.1));
+        self.dpr = (self.native_dpr * self.internal_resolution_scale)
+            .clamp(VECTOR_DYNAMIC_RES_MIN_EFFECTIVE_DPR.min(self.native_dpr), self.native_dpr);
+        self.frame_snapshot = None;
 
         let pixel_width = (self.width * self.dpr).round().max(1.0) as u32;
         let pixel_height = (self.height * self.dpr).round().max(1.0) as u32;
@@ -2622,13 +3356,28 @@ impl VectorEngineState {
         }
 
         self.cancel_view_animation();
+        for request_id in self
+            .in_flight_request_by_id
+            .keys()
+            .copied()
+            .collect::<Vec<u32>>()
+        {
+            let _ = self.cancel_in_flight_request(request_id);
+        }
         self.tile_url_template = template;
         self.pending_tiles.clear();
         self.high_priority_queue.clear();
         self.medium_priority_queue.clear();
         self.low_priority_queue.clear();
+        self.decode_high_priority_queue.clear();
+        self.decode_medium_priority_queue.clear();
+        self.decode_low_priority_queue.clear();
+        self.in_flight_request_by_id.clear();
+        self.in_flight_request_id_by_tile.clear();
         self.in_flight_requests = 0;
         self.tile_cache.clear();
+        self.bump_request_generation();
+        self.update_perf_queue_snapshot();
     }
 
     fn is_zoom_relevant_for_view(&self, tile_zoom: u8) -> bool {
@@ -2648,6 +3397,7 @@ impl VectorEngineState {
             RequestPriority::Medium => self.medium_priority_queue.push_back(key),
             RequestPriority::Low => self.low_priority_queue.push_back(key),
         }
+        self.update_perf_queue_snapshot();
     }
 
     fn enqueue_candidates_sorted(
@@ -2663,6 +3413,9 @@ impl VectorEngineState {
 
     fn queue_zoom_warmup_tiles(&mut self, base_fetch_zoom: u8) {
         if self.last_zoom_direction == 0 || self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+        if self.aggressive_zoom_out_quality_active(self.last_frame_now_ms) {
             return;
         }
 
@@ -2728,7 +3481,7 @@ impl VectorEngineState {
         self.enqueue_candidates_sorted(candidates, RequestPriority::Low);
     }
 
-    fn dequeue_next_request(&mut self) -> Option<TileKey> {
+    fn dequeue_next_request(&mut self) -> Option<(TileKey, RequestPriority)> {
         let (min_relevant_zoom, max_relevant_zoom) = self.relevant_fetch_zoom_bounds();
 
         if let Some(key) = Self::pop_latest_relevant_request(
@@ -2737,7 +3490,8 @@ impl VectorEngineState {
             min_relevant_zoom,
             max_relevant_zoom,
         ) {
-            return Some(key);
+            self.update_perf_queue_snapshot();
+            return Some((key, RequestPriority::High));
         }
 
         if let Some(key) = Self::pop_latest_relevant_request(
@@ -2746,20 +3500,29 @@ impl VectorEngineState {
             min_relevant_zoom,
             max_relevant_zoom,
         ) {
-            return Some(key);
+            self.update_perf_queue_snapshot();
+            return Some((key, RequestPriority::Medium));
         }
 
-        Self::pop_latest_relevant_request(
+        let key = Self::pop_latest_relevant_request(
             &mut self.low_priority_queue,
             &mut self.pending_tiles,
             min_relevant_zoom,
             max_relevant_zoom,
-        )
+        );
+        if key.is_some() {
+            self.update_perf_queue_snapshot();
+        }
+        key.map(|key| (key, RequestPriority::Low))
     }
 
-    fn insert_tile_scene(&mut self, key: TileKey, scene: VectorTileScene) {
+    fn insert_tile_scene_prepared(
+        &mut self,
+        key: TileKey,
+        scene: VectorTileScene,
+        prepared_geometry: PreparedVectorTileGeometry,
+    ) {
         self.cache_tick = self.cache_tick.saturating_add(1);
-        let prepared_geometry = build_prepared_vector_tile_geometry(&scene, key.z <= 8);
         self.tile_cache.insert(
             key,
             CachedVectorTile {
@@ -2803,7 +3566,11 @@ impl VectorEngineState {
         let tile = self.tile_cache.get_mut(&key)?;
         tile.last_used = next_tick;
         if tile.gl_buffers.is_none() {
+            let upload_start = now_ms();
             tile.gl_buffers = Some(build_tile_gl_buffers(gl, &tile.prepared_geometry));
+            if self.perf.enabled {
+                self.perf.gl_upload_ms.record(now_ms() - upload_start);
+            }
         }
         tile.gl_buffers.clone()
     }
@@ -2867,13 +3634,16 @@ impl VectorEngineState {
     }
 
     fn should_use_coarse_water_mesh(&self, cmd: &VectorGlTileDrawCommand) -> bool {
-        let threshold = if cmd.prefer_coarse_water {
+        let mut threshold = if cmd.prefer_coarse_water {
             VECTOR_COARSE_WATER_TILE_SIZE_FALLBACK_CSS_PX
         } else if self.zoom_motion_active() {
             VECTOR_COARSE_WATER_TILE_SIZE_ACTIVE_ZOOM_CSS_PX
         } else {
             VECTOR_COARSE_WATER_TILE_SIZE_CSS_PX
         };
+        if self.aggressive_zoom_out_quality_active(self.last_frame_now_ms) {
+            threshold *= 1.35;
+        }
         cmd.tile_display_size <= threshold
     }
 
@@ -2997,6 +3767,169 @@ impl VectorEngineState {
         true
     }
 
+    fn should_use_zoom_snapshot_surrogate(&self, now_ms: f64) -> bool {
+        if !self.zoom_motion_active() {
+            return false;
+        }
+        let aggressive = self.aggressive_zoom_out_quality_active(now_ms);
+        let active_window_ms = if aggressive {
+            VECTOR_ZOOM_SNAPSHOT_ACTIVE_WINDOW_MS * 1.8
+        } else {
+            VECTOR_ZOOM_SNAPSHOT_ACTIVE_WINDOW_MS
+        };
+        if now_ms - self.last_wheel_zoom_input_ms > active_window_ms {
+            return false;
+        }
+        let max_full_redraw_interval_ms = if aggressive {
+            VECTOR_ZOOM_SNAPSHOT_MAX_FULL_REDRAW_INTERVAL_MS * 1.5
+        } else {
+            VECTOR_ZOOM_SNAPSHOT_MAX_FULL_REDRAW_INTERVAL_MS
+        };
+        if now_ms - self.last_full_webgl_draw_ms >= max_full_redraw_interval_ms {
+            return false;
+        }
+
+        let Some(snapshot) = self.frame_snapshot.as_ref() else {
+            return false;
+        };
+        if now_ms - snapshot.captured_at_ms > VECTOR_ZOOM_SNAPSHOT_MAX_AGE_MS {
+            return false;
+        }
+        if snapshot.pixel_width <= 0
+            || snapshot.pixel_height <= 0
+            || (snapshot.css_width - self.width).abs() > 0.5
+            || (snapshot.css_height - self.height).abs() > 0.5
+        {
+            return false;
+        }
+        true
+    }
+
+    fn draw_zoom_snapshot_surrogate(
+        &self,
+        gl: &WebGl2RenderingContext,
+        painter: &SnapshotGlPainter,
+        pixel_width: i32,
+        pixel_height: i32,
+    ) -> bool {
+        let Some(snapshot) = self.frame_snapshot.as_ref() else {
+            return false;
+        };
+        if snapshot.pixel_width != pixel_width || snapshot.pixel_height != pixel_height {
+            return false;
+        }
+        if snapshot.css_width <= 0.0 || snapshot.css_height <= 0.0 || self.width <= 0.0 || self.height <= 0.0 {
+            return false;
+        }
+
+        let (snap_world0_x, snap_world0_y) =
+            lon_lat_to_world(snapshot.center_lon, snapshot.center_lat, 0, self.tile_size);
+        let (cur_world0_x, cur_world0_y) =
+            lon_lat_to_world(self.center_lon, self.center_lat, 0, self.tile_size);
+        let world0_span = f64::from(self.tile_size);
+        let dx_world0 = (snap_world0_x - cur_world0_x + world0_span * 0.5)
+            .rem_euclid(world0_span)
+            - world0_span * 0.5;
+        let dy_world0 = snap_world0_y - cur_world0_y;
+        let scale = 2.0_f64.powf(self.zoom - snapshot.zoom);
+        if !scale.is_finite() || scale <= 0.0 {
+            return false;
+        }
+
+        let offset_x_css = dx_world0 * Self::zoom_scale(self.zoom);
+        let offset_y_css = dy_world0 * Self::zoom_scale(self.zoom);
+        let dest_x = self.width * 0.5 + (0.0 - snapshot.css_width * 0.5) * scale + offset_x_css;
+        let dest_y = self.height * 0.5 + (0.0 - snapshot.css_height * 0.5) * scale + offset_y_css;
+        let dest_w = snapshot.css_width * scale;
+        let dest_h = snapshot.css_height * scale;
+
+        gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+        gl.disable(WebGl2RenderingContext::BLEND);
+        gl.use_program(Some(&painter.program));
+        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&snapshot.texture));
+        gl.uniform1i(Some(&painter.texture_uniform), 0);
+        gl.uniform2f(
+            Some(&painter.dest_origin_uniform),
+            dest_x as f32,
+            dest_y as f32,
+        );
+        gl.uniform2f(Some(&painter.dest_size_uniform), dest_w as f32, dest_h as f32);
+        gl.uniform2f(
+            Some(&painter.viewport_uniform),
+            f64::from(pixel_width.max(1)) as f32,
+            f64::from(pixel_height.max(1)) as f32,
+        );
+        gl.uniform1f(Some(&painter.dpr_uniform), self.dpr as f32);
+        gl.draw_arrays(WebGl2RenderingContext::TRIANGLE_STRIP, 0, 4);
+        true
+    }
+
+    fn capture_webgl_frame_snapshot(
+        &mut self,
+        gl: &WebGl2RenderingContext,
+        pixel_width: i32,
+        pixel_height: i32,
+        now_ms: f64,
+    ) {
+        if pixel_width <= 0 || pixel_height <= 0 || self.width <= 0.0 || self.height <= 0.0 {
+            return;
+        }
+
+        let texture = if let Some(snapshot) = self.frame_snapshot.as_ref() {
+            snapshot.texture.clone()
+        } else {
+            let Some(texture) = gl.create_texture() else {
+                return;
+            };
+            texture
+        };
+
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
+        gl.tex_parameteri(
+            WebGl2RenderingContext::TEXTURE_2D,
+            WebGl2RenderingContext::TEXTURE_MIN_FILTER,
+            WebGl2RenderingContext::LINEAR as i32,
+        );
+        gl.tex_parameteri(
+            WebGl2RenderingContext::TEXTURE_2D,
+            WebGl2RenderingContext::TEXTURE_MAG_FILTER,
+            WebGl2RenderingContext::LINEAR as i32,
+        );
+        gl.tex_parameteri(
+            WebGl2RenderingContext::TEXTURE_2D,
+            WebGl2RenderingContext::TEXTURE_WRAP_S,
+            WebGl2RenderingContext::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameteri(
+            WebGl2RenderingContext::TEXTURE_2D,
+            WebGl2RenderingContext::TEXTURE_WRAP_T,
+            WebGl2RenderingContext::CLAMP_TO_EDGE as i32,
+        );
+        gl.copy_tex_image_2d(
+            WebGl2RenderingContext::TEXTURE_2D,
+            0,
+            WebGl2RenderingContext::RGBA,
+            0,
+            0,
+            pixel_width,
+            pixel_height,
+            0,
+        );
+
+        self.frame_snapshot = Some(WebGlFrameSnapshot {
+            texture,
+            pixel_width,
+            pixel_height,
+            css_width: self.width,
+            css_height: self.height,
+            center_lon: self.center_lon,
+            center_lat: self.center_lat,
+            zoom: self.zoom,
+            captured_at_ms: now_ms,
+        });
+    }
+
     fn draw_cached_tile_webgl_layers(
         &mut self,
         gl: &WebGl2RenderingContext,
@@ -3036,6 +3969,13 @@ impl VectorEngineState {
             };
 
             if let (Some(buffer), count) = (water_buffer, water_count) {
+                if self.perf.enabled {
+                    self.perf.last_water_vertices_drawn = self
+                        .perf
+                        .last_water_vertices_drawn
+                        .saturating_add(count.max(0) as u32);
+                    self.perf.last_full_draw_used_coarse_water |= use_coarse;
+                }
                 painter.draw_tile_buffer(
                     gl,
                     WebGl2RenderingContext::TRIANGLES,
@@ -3056,6 +3996,12 @@ impl VectorEngineState {
             if let (Some(buffer), count) =
                 (buffers.transportation_buffer.as_ref(), buffers.transportation_vertex_count)
             {
+                if self.perf.enabled {
+                    self.perf.last_line_vertices_drawn = self
+                        .perf
+                        .last_line_vertices_drawn
+                        .saturating_add(count.max(0) as u32);
+                }
                 painter.draw_tile_buffer(
                     gl,
                     WebGl2RenderingContext::LINES,
@@ -3412,6 +4358,7 @@ impl VectorEngineState {
     fn queue_visible_tiles(&mut self) -> (u8, f64, f64, f64) {
         let render_zoom = self.current_render_zoom();
         let fetch_zoom = render_zoom.min(self.source_max_zoom);
+        let aggressive_quality_active = self.aggressive_zoom_out_quality_active(self.last_frame_now_ms);
         let tile_size_f = f64::from(self.tile_size);
         let display_scale = Self::zoom_scale_for_delta(fetch_zoom, self.zoom);
         let (center_world_x, center_world_y) =
@@ -3428,10 +4375,15 @@ impl VectorEngineState {
         let visible_min_ty = (top_left_world_y / tile_size_f).floor() as i64;
         let visible_max_ty = ((top_left_world_y + viewport_world_h) / tile_size_f).ceil() as i64;
 
-        let outer_min_tx = visible_min_tx - i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
-        let outer_max_tx = visible_max_tx + i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
-        let outer_min_ty = visible_min_ty - i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
-        let outer_max_ty = visible_max_ty + i64::from(VECTOR_PREFETCH_OUTER_MARGIN);
+        let outer_margin = if aggressive_quality_active {
+            1
+        } else {
+            VECTOR_PREFETCH_OUTER_MARGIN
+        };
+        let outer_min_tx = visible_min_tx - i64::from(outer_margin);
+        let outer_max_tx = visible_max_tx + i64::from(outer_margin);
+        let outer_min_ty = visible_min_ty - i64::from(outer_margin);
+        let outer_max_ty = visible_max_ty + i64::from(outer_margin);
 
         let immediate_min_tx = visible_min_tx - i64::from(TILE_PREFETCH_MARGIN);
         let immediate_max_tx = visible_max_tx + i64::from(TILE_PREFETCH_MARGIN);
@@ -3485,19 +4437,37 @@ impl VectorEngineState {
         self.enqueue_candidates_sorted(medium_candidates, RequestPriority::Medium);
         self.enqueue_candidates_sorted(high_candidates, RequestPriority::High);
         self.queue_zoom_warmup_tiles(fetch_zoom);
+        if self.perf.enabled {
+            let visible_w = (visible_max_tx - visible_min_tx + 1).max(0) as usize;
+            let visible_h = (visible_max_ty - visible_min_ty + 1).max(0) as usize;
+            self.perf.last_visible_tile_count =
+                visible_w.saturating_mul(visible_h).min(u32::MAX as usize) as u32;
+            self.perf.last_fetch_zoom = fetch_zoom;
+            self.perf.last_aggressive_quality = aggressive_quality_active;
+        }
+        self.update_perf_queue_snapshot();
 
         // Wrap top-left x into world span to keep screen placement stable for rendering.
         let wrapped_top_left_x = top_left_world_x.rem_euclid(world_span);
         (fetch_zoom, display_scale, wrapped_top_left_x, top_left_world_y)
     }
 
-    fn draw(&mut self, now_ms: f64) {
-        self.last_frame_now_ms = now_ms;
-        self.update_view_animation(now_ms);
+    fn draw(&mut self, frame_now_ms: f64) {
+        let frame_started_at = now_ms();
+        self.last_frame_now_ms = frame_now_ms;
+        self.update_view_animation(frame_now_ms);
         if self.gl.is_some() {
             self.draw_webgl();
         } else {
             self.draw_canvas2d();
+        }
+        self.process_decode_queue_budget(frame_now_ms);
+        if self.perf.enabled {
+            self.perf.frames = self.perf.frames.saturating_add(1);
+            self.perf.frame_ms.record(now_ms() - frame_started_at);
+            self.perf.last_aggressive_quality =
+                self.aggressive_zoom_out_quality_active(frame_now_ms);
+            self.update_perf_queue_snapshot();
         }
     }
 
@@ -3578,6 +4548,9 @@ impl VectorEngineState {
     }
 
     fn draw_webgl(&mut self) {
+        let draw_started_at = now_ms();
+        self.update_internal_resolution_for_frame(self.last_frame_now_ms);
+
         let Some(gl) = self.gl.clone() else {
             return;
         };
@@ -3599,6 +4572,22 @@ impl VectorEngineState {
         let tile_display_size = tile_size_f * display_scale;
         if tile_display_size <= 0.0 {
             return;
+        }
+
+        if let Some(snapshot_painter) = self.snapshot_painter.as_ref() {
+            if self.should_use_zoom_snapshot_surrogate(self.last_frame_now_ms)
+                && self.draw_zoom_snapshot_surrogate(&gl, snapshot_painter, pixel_width, pixel_height)
+            {
+                if self.perf.enabled {
+                    self.perf.last_snapshot_active = true;
+                    self.perf.snapshot_surrogate_frames =
+                        self.perf.snapshot_surrogate_frames.saturating_add(1);
+                    self.perf
+                        .snapshot_draw_ms
+                        .record(now_ms() - draw_started_at);
+                }
+                return;
+            }
         }
 
         let tiles_per_axis = 1u32 << fetch_zoom;
@@ -3684,8 +4673,24 @@ impl VectorEngineState {
             );
         }
 
+        let aggressive_quality_active = self.aggressive_zoom_out_quality_active(self.last_frame_now_ms);
+        if aggressive_quality_active && fallback_draw_commands.len() > 24 {
+            fallback_draw_commands.truncate(24);
+        }
+
         gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
         if let Some(painter) = self.painter.clone() {
+            if self.perf.enabled {
+                self.perf.last_snapshot_active = false;
+                self.perf.last_target_draw_commands =
+                    target_draw_commands.len().min(u32::MAX as usize) as u32;
+                self.perf.last_fallback_draw_commands =
+                    fallback_draw_commands.len().min(u32::MAX as usize) as u32;
+                self.perf.last_water_vertices_drawn = 0;
+                self.perf.last_line_vertices_drawn = 0;
+                self.perf.last_full_draw_used_coarse_water = false;
+                self.perf.last_aggressive_quality = aggressive_quality_active;
+            }
             for cmd in &fallback_draw_commands {
                 self.draw_cached_tile_webgl_layers(
                     &gl,
@@ -3732,6 +4737,25 @@ impl VectorEngineState {
                 );
             }
         }
+
+        self.last_full_webgl_draw_ms = self.last_frame_now_ms;
+        if self.perf.enabled {
+            self.perf.full_redraw_frames = self.perf.full_redraw_frames.saturating_add(1);
+            self.perf.full_draw_ms.record(now_ms() - draw_started_at);
+        }
+
+        if self.snapshot_painter.is_some() {
+            let should_capture = match self.frame_snapshot.as_ref() {
+                Some(snapshot) => {
+                    !self.zoom_motion_active()
+                        || (self.last_frame_now_ms - snapshot.captured_at_ms) >= 120.0
+                }
+                None => true,
+            };
+            if should_capture {
+                self.capture_webgl_frame_snapshot(&gl, pixel_width, pixel_height, self.last_frame_now_ms);
+            }
+        }
     }
 
     fn get_view_state(&self) -> ViewState {
@@ -3743,28 +4767,63 @@ impl VectorEngineState {
     }
 }
 
-fn request_vector_tile(state: Rc<RefCell<VectorEngineState>>, key: TileKey, url: String) {
+fn request_vector_tile(
+    state: Rc<RefCell<VectorEngineState>>,
+    key: TileKey,
+    url: String,
+    request_id: u32,
+) {
     spawn_local(async move {
         let request_url = url.clone();
-        let result = fetch_tile_bytes(url).await.and_then(|value| {
+        let result = fetch_tile_bytes_managed(url, request_id).await.and_then(|value| {
             let bytes = Uint8Array::new(&value).to_vec();
             Ok(bytes)
         });
+        let fetched_at_ms = now_ms();
 
         {
             let mut state_mut = state.borrow_mut();
-            state_mut.pending_tiles.remove(&key);
-            state_mut.in_flight_requests = state_mut.in_flight_requests.saturating_sub(1);
+            if let Some(request_meta) = state_mut.finish_in_flight_request(request_id) {
+                let is_current_source = state_mut.tile_url(key) == request_url;
+                let is_relevant_zoom = state_mut.is_zoom_relevant_for_view(key.z);
 
-            let is_current_source = state_mut.tile_url(key) == request_url;
-            let is_relevant_zoom = state_mut.is_zoom_relevant_for_view(key.z);
-
-            if is_current_source && is_relevant_zoom {
-                if let Ok(bytes) = result {
-                    if let Ok(scene) = decode_mvt_tile_scene(&bytes) {
-                        state_mut.insert_tile_scene(key, scene);
+                match result {
+                    Ok(bytes) if is_current_source && is_relevant_zoom => {
+                        let fetch_elapsed = (fetched_at_ms - request_meta.started_at_ms).max(0.0);
+                        if state_mut.perf.enabled {
+                            state_mut.perf.fetch_ms.record(fetch_elapsed);
+                            state_mut
+                                .perf
+                                .record_fetch_bytes(fetched_at_ms, key.z, bytes.len());
+                        }
+                        state_mut.enqueue_decode_tile(PendingDecodeTile {
+                            key,
+                            bytes,
+                            priority: request_meta.priority,
+                            generation: request_meta.generation,
+                            request_url,
+                        });
+                    }
+                    Ok(_bytes) => {
+                        state_mut.pending_tiles.remove(&key);
+                        if state_mut.perf.enabled {
+                            state_mut.perf.stale_result_drops =
+                                state_mut.perf.stale_result_drops.saturating_add(1);
+                        }
+                    }
+                    Err(error) => {
+                        state_mut.pending_tiles.remove(&key);
+                        let is_abort = error
+                            .as_string()
+                            .map(|message| message.contains("AbortError"))
+                            .unwrap_or(false);
+                        if !is_abort && state_mut.perf.enabled {
+                            state_mut.perf.fetch_errors =
+                                state_mut.perf.fetch_errors.saturating_add(1);
+                        }
                     }
                 }
+                state_mut.update_perf_queue_snapshot();
             }
         }
 
@@ -3779,20 +4838,21 @@ fn pump_vector_requests(state: Rc<RefCell<VectorEngineState>>) {
 
             if state_mut.in_flight_requests >= state_mut.max_in_flight_requests {
                 None
-            } else if let Some(key) = state_mut.dequeue_next_request() {
-                state_mut.in_flight_requests += 1;
+            } else if let Some((key, priority)) = state_mut.dequeue_next_request() {
                 let url = state_mut.tile_url(key);
-                Some((key, url))
+                let generation = state_mut.request_generation;
+                let request = state_mut.register_in_flight_request(key, priority, generation);
+                Some((key, url, request.request_id))
             } else {
                 None
             }
         };
 
-        let Some((key, url)) = next else {
+        let Some((key, url, request_id)) = next else {
             break;
         };
 
-        request_vector_tile(state.clone(), key, url);
+        request_vector_tile(state.clone(), key, url, request_id);
     }
 }
 
@@ -3864,16 +4924,31 @@ pub fn init_vector_engine(
         VectorBackendKind::WebGl2
     };
 
-    let (surface, gl, painter, ctx2d, backend_kind) = match make_gl_canvas_surface(canvas_or_offscreen.clone()) {
+    let (surface, gl, painter, snapshot_painter, ctx2d, backend_kind) = match make_gl_canvas_surface(canvas_or_offscreen.clone()) {
         Ok((surface, gl)) => {
             gl.disable(WebGl2RenderingContext::DEPTH_TEST);
             gl.disable(WebGl2RenderingContext::BLEND);
             let painter = create_simple_gl_painter(&gl).ok();
-            (surface, Some(gl), painter, None, preferred_webgl_backend_kind)
+            let snapshot_painter = create_snapshot_gl_painter(&gl).ok();
+            (
+                surface,
+                Some(gl),
+                painter,
+                snapshot_painter,
+                None,
+                preferred_webgl_backend_kind,
+            )
         }
         Err(_) => {
             let (surface, ctx2d) = make_canvas_surface(canvas_or_offscreen)?;
-            (surface, None, None, Some(ctx2d), VectorBackendKind::Canvas2d)
+            (
+                surface,
+                None,
+                None,
+                None,
+                Some(ctx2d),
+                VectorBackendKind::Canvas2d,
+            )
         }
     };
 
@@ -3881,10 +4956,13 @@ pub fn init_vector_engine(
         surface,
         gl,
         painter,
+        snapshot_painter,
         ctx2d,
         width: 1024.0,
         height: 768.0,
+        native_dpr: 1.0,
         dpr: 1.0,
+        internal_resolution_scale: 1.0,
         tile_url_template,
         min_zoom,
         max_zoom,
@@ -3902,11 +4980,22 @@ pub fn init_vector_engine(
         high_priority_queue: VecDeque::new(),
         medium_priority_queue: VecDeque::new(),
         low_priority_queue: VecDeque::new(),
+        decode_high_priority_queue: VecDeque::new(),
+        decode_medium_priority_queue: VecDeque::new(),
+        decode_low_priority_queue: VecDeque::new(),
+        next_request_id: 1,
+        request_generation: 0,
+        in_flight_request_by_id: HashMap::new(),
+        in_flight_request_id_by_tile: HashMap::new(),
         in_flight_requests: 0,
         max_in_flight_requests: MAX_IN_FLIGHT_REQUESTS,
         source_max_zoom,
         backend_kind,
         last_zoom_direction: 0,
+        frame_snapshot: None,
+        last_wheel_zoom_input_ms: f64::NEG_INFINITY,
+        last_full_webgl_draw_ms: f64::NEG_INFINITY,
+        perf: VectorPerfTelemetry::default(),
     };
 
     Ok(VectorMapEngine {
@@ -3955,6 +5044,7 @@ impl VectorMapEngine {
         let (lon, lat) = world_to_lon_lat(new_world_x, new_world_y, render_zoom, state.tile_size);
         state.center_lon = normalize_lon(lon);
         state.center_lat = clamp_lat(lat);
+        state.bump_request_generation();
     }
 
     pub fn pointer_up(&mut self, _x: f32, _y: f32) {
@@ -3968,6 +5058,7 @@ impl VectorMapEngine {
 
         let mut state = self.state.borrow_mut();
         state.cancel_view_animation();
+        state.last_wheel_zoom_input_ms = state.last_frame_now_ms;
         let old_zoom = state.zoom;
         let zoom_delta = -f64::from(delta_y) * WHEEL_ZOOM_SENSITIVITY;
         let new_zoom = state.zoom_clamp_f64(old_zoom + zoom_delta);
@@ -4000,12 +5091,16 @@ impl VectorMapEngine {
         state.center_lon = normalize_lon(center_lon);
         state.center_lat = clamp_lat(center_lat);
         state.last_zoom_direction = if new_zoom > old_zoom { 1 } else { -1 };
+        state.bump_request_generation();
+        state.cancel_stale_in_flight_requests();
     }
 
     pub fn set_view(&mut self, lon: f64, lat: f64, zoom: f32) {
         let mut state = self.state.borrow_mut();
         state.last_zoom_direction = 0;
         state.set_view(lon, lat as f32, zoom);
+        state.bump_request_generation();
+        state.cancel_stale_in_flight_requests();
     }
 
     pub fn zoom_to_box(&mut self, start_x: f32, start_y: f32, end_x: f32, end_y: f32) {
@@ -4017,6 +5112,8 @@ impl VectorMapEngine {
             f64::from(end_x),
             f64::from(end_y),
         );
+        state.bump_request_generation();
+        state.cancel_stale_in_flight_requests();
     }
 
     pub fn place_marker(&mut self, _x: f32, _y: f32) {}
@@ -4055,8 +5152,20 @@ impl VectorMapEngine {
     pub fn remove_recent_markers(&mut self, _count: u32) {}
 
     pub fn frame(&mut self, now_ms: f64) {
-        self.state.borrow_mut().draw(now_ms);
+        {
+            let mut state = self.state.borrow_mut();
+            state.draw(now_ms);
+            state.cancel_stale_in_flight_requests();
+        }
         pump_vector_requests(self.state.clone());
+    }
+
+    pub fn set_perf_debug_enabled(&mut self, enabled: bool) {
+        self.state.borrow_mut().set_perf_debug_enabled(enabled);
+    }
+
+    pub fn take_perf_stats_json(&self) -> Result<JsValue, JsValue> {
+        self.state.borrow().take_perf_stats_js_value()
     }
 
     pub fn load_trajectory_csv(&mut self, _bytes: Vec<u8>) -> Result<JsValue, JsValue> {
@@ -4085,10 +5194,23 @@ impl VectorMapEngine {
 
     pub fn destroy(&mut self) {
         let mut state = self.state.borrow_mut();
+        for request_id in state
+            .in_flight_request_by_id
+            .keys()
+            .copied()
+            .collect::<Vec<u32>>()
+        {
+            let _ = state.cancel_in_flight_request(request_id);
+        }
         state.pending_tiles.clear();
         state.high_priority_queue.clear();
         state.medium_priority_queue.clear();
         state.low_priority_queue.clear();
+        state.decode_high_priority_queue.clear();
+        state.decode_medium_priority_queue.clear();
+        state.decode_low_priority_queue.clear();
+        state.in_flight_request_by_id.clear();
+        state.in_flight_request_id_by_tile.clear();
         state.in_flight_requests = 0;
         state.tile_cache.clear();
         state.dragging = None;
@@ -4245,6 +5367,12 @@ impl MapEngine {
 
     pub fn get_render_backend(&self) -> String {
         "canvas2d".to_string()
+    }
+
+    pub fn set_perf_debug_enabled(&mut self, _enabled: bool) {}
+
+    pub fn take_perf_stats_json(&self) -> Result<JsValue, JsValue> {
+        Ok(JsValue::NULL)
     }
 
     pub fn remove_recent_markers(&mut self, count: u32) {

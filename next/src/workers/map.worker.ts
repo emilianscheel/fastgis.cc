@@ -6,6 +6,7 @@ import type {
   MarkerHover,
   PlacedMarker,
   ProjectedPoint,
+  VectorPerfStats,
   ViewState,
   WorkerInMessage,
   WorkerOutMessage
@@ -34,6 +35,8 @@ type WasmMapEngine = {
   set_tile_url_template(template: string): void;
   get_engine_kind?(): EngineKind;
   get_render_backend?(): "webgl2" | "webgpu" | "webgpu-fallback-webgl2" | "canvas2d";
+  set_perf_debug_enabled?(enabled: boolean): void;
+  take_perf_stats_json?(): VectorPerfStats | null;
   destroy(): void;
 };
 
@@ -54,6 +57,9 @@ let wasmModulePromise: Promise<WasmModule> | null = null;
 let engine: WasmMapEngine | null = null;
 let appOrigin: string | null = null;
 let activeEngineKind: EngineKind = "raster";
+let perfOverlayEnabled = false;
+let lastPerfPostMs = 0;
+const PERF_POST_INTERVAL_MS = 250;
 
 function postMessageToMain(message: WorkerOutMessage): void {
   workerContext.postMessage(message);
@@ -178,10 +184,21 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
     engine.set_view(0, 20, 2);
     const reportedEngineKind = engine.get_engine_kind?.() ?? activeEngineKind;
     const backend = engine.get_render_backend?.() ?? (reportedEngineKind === "vector" ? "webgl2" : "canvas2d");
+    engine.set_perf_debug_enabled?.(perfOverlayEnabled);
     postMessageToMain({
       type: "READY",
       payload: { mode: "worker", engineKind: reportedEngineKind, backend }
     });
+    return;
+  }
+
+  if (message.type === "SET_DEBUG_OPTIONS") {
+    perfOverlayEnabled = Boolean(message.payload.perfOverlayEnabled);
+    engine?.set_perf_debug_enabled?.(perfOverlayEnabled);
+    if (engine && perfOverlayEnabled && typeof engine.take_perf_stats_json === "function") {
+      const stats = engine.take_perf_stats_json() ?? null;
+      postMessageToMain({ type: "PERF_STATS", payload: { stats } });
+    }
     return;
   }
 
@@ -339,6 +356,17 @@ async function handleMessage(message: WorkerInMessage): Promise<void> {
 
   if (message.type === "FRAME_TICK") {
     engine.frame(message.payload.nowMs);
+    if (perfOverlayEnabled && typeof engine.take_perf_stats_json === "function") {
+      const now = performance.now();
+      if (now - lastPerfPostMs >= PERF_POST_INTERVAL_MS) {
+        lastPerfPostMs = now;
+        const stats = engine.take_perf_stats_json() ?? null;
+        postMessageToMain({
+          type: "PERF_STATS",
+          payload: { stats }
+        });
+      }
+    }
     return;
   }
 

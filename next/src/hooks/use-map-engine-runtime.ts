@@ -9,6 +9,7 @@ import type {
   PlacedMarker,
   ProjectedPoint,
   RasterInitConfig,
+  VectorPerfStats,
   VectorBackendActual,
   VectorBackendPreference,
   VectorInitConfig,
@@ -40,6 +41,8 @@ type MainThreadEngine = {
   load_marker_csv(bytes: Uint8Array): unknown;
   clear_trajectory(): void;
   set_tile_url_template(template: string): void;
+  set_perf_debug_enabled?(enabled: boolean): void;
+  take_perf_stats_json?(): VectorPerfStats | null;
   destroy(): void;
 };
 
@@ -48,6 +51,7 @@ export type RuntimeStatus = "loading" | "ready" | "error";
 type PointerMessageType = "POINTER_DOWN" | "POINTER_MOVE" | "POINTER_UP";
 const VECTOR_OVERZOOM_EXTRA_LEVELS = 6;
 const VECTOR_RENDER_MAX_ZOOM_CAP = 24;
+const PERF_POLL_INTERVAL_MS = 250;
 
 type BaseMapConfig = {
   minZoom: number;
@@ -125,10 +129,14 @@ export function useMapEngineRuntime({
     backend: "canvas2d",
     mode: "none"
   });
+  const perfDebugEnabledRef = useRef(false);
+  const lastPerfPollMsRef = useRef(0);
 
   const [status, setStatus] = useState<RuntimeStatus>("loading");
   const [canvasInstance, setCanvasInstance] = useState(0);
   const [markerHover, setMarkerHover] = useState<MarkerHover | null>(null);
+  const [perfDebugEnabled, setPerfDebugEnabledState] = useState(false);
+  const [perfStats, setPerfStats] = useState<VectorPerfStats | null>(null);
   const canInteract = status === "ready";
 
   const viewportSize = useCallback(() => {
@@ -505,6 +513,18 @@ export function useMapEngineRuntime({
         });
       } else if (runtimeModeRef.current === "main") {
         mainEngineRef.current?.frame(nowMs);
+        if (
+          perfDebugEnabledRef.current &&
+          typeof mainEngineRef.current?.take_perf_stats_json === "function" &&
+          nowMs - lastPerfPollMsRef.current >= PERF_POLL_INTERVAL_MS
+        ) {
+          lastPerfPollMsRef.current = nowMs;
+          try {
+            setPerfStats(mainEngineRef.current.take_perf_stats_json?.() ?? null);
+          } catch (error) {
+            console.error(error);
+          }
+        }
       }
 
       rafRef.current = window.requestAnimationFrame(frame);
@@ -524,6 +544,7 @@ export function useMapEngineRuntime({
     workerReadyRef.current = false;
     workerRef.current?.terminate();
     workerRef.current = null;
+    lastPerfPollMsRef.current = 0;
     for (const resolve of pendingMarkerPlacementsRef.current.values()) {
       resolve(null);
     }
@@ -535,8 +556,9 @@ export function useMapEngineRuntime({
     for (const resolve of pendingViewRequestsRef.current.values()) {
       resolve(null);
     }
-    pendingViewRequestsRef.current.clear();
-  }, []);
+      pendingViewRequestsRef.current.clear();
+      setPerfStats(null);
+    }, []);
 
   const resetCanvasElement = useCallback(async () => {
     setCanvasInstance((prev) => prev + 1);
@@ -575,6 +597,7 @@ export function useMapEngineRuntime({
       engine.resize(width, height, window.devicePixelRatio || 1);
       const view = options?.restoreView ?? lastKnownViewRef.current;
       engine.set_view(view?.lon ?? 0, view?.lat ?? 20, view?.zoom ?? 2);
+      engine.set_perf_debug_enabled?.(perfDebugEnabledRef.current);
 
       mainEngineRef.current?.destroy();
       mainEngineRef.current = engine;
@@ -644,6 +667,11 @@ export function useMapEngineRuntime({
 
         setStatus("error");
         console.error(message.payload.message);
+        return;
+      }
+
+      if (message.type === "PERF_STATS") {
+        setPerfStats(message.payload.stats);
         return;
       }
 
@@ -748,6 +776,10 @@ export function useMapEngineRuntime({
             }
           };
           worker.postMessage(message, [offscreen]);
+          worker.postMessage({
+            type: "SET_DEBUG_OPTIONS",
+            payload: { perfOverlayEnabled: perfDebugEnabledRef.current }
+          } satisfies WorkerInMessage);
           worker.postMessage({
             type: "SET_VIEW",
             payload: lastKnownViewRef.current
@@ -930,6 +962,36 @@ export function useMapEngineRuntime({
 
   const getViewState = useCallback(() => getCurrentViewState(), [getCurrentViewState]);
 
+  const setPerfDebugEnabled = useCallback(
+    (enabled: boolean) => {
+      perfDebugEnabledRef.current = enabled;
+      setPerfDebugEnabledState(enabled);
+      lastPerfPollMsRef.current = 0;
+
+      if (!enabled) {
+        setPerfStats(null);
+      }
+
+      if (runtimeModeRef.current === "worker") {
+        sendToWorker({
+          type: "SET_DEBUG_OPTIONS",
+          payload: { perfOverlayEnabled: enabled }
+        });
+        return;
+      }
+
+      try {
+        mainEngineRef.current?.set_perf_debug_enabled?.(enabled);
+        if (enabled) {
+          setPerfStats(mainEngineRef.current?.take_perf_stats_json?.() ?? null);
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [sendToWorker]
+  );
+
   return {
     canvasRef,
     stageRef,
@@ -953,6 +1015,9 @@ export function useMapEngineRuntime({
     loadMarkerCsv,
     setTileUrlTemplate,
     getViewState,
+    perfDebugEnabled,
+    perfStats,
+    setPerfDebugEnabled,
     activeEngineKind: activeInitConfigRef.current?.engineKind ?? desiredInitConfigRef.current.engineKind,
     readyDiagnostics: readyDiagnosticsRef.current
   };

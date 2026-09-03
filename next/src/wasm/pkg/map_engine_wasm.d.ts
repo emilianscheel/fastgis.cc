@@ -24,8 +24,10 @@ export class MapEngine {
     remove_marker_lon_lat(lon: number, lat: number): void;
     remove_recent_markers(count: number): void;
     resize(width: number, height: number, dpr: number): void;
+    set_perf_debug_enabled(_enabled: boolean): void;
     set_tile_url_template(template: string): void;
     set_view(lon: number, lat: number, zoom: number): void;
+    take_perf_stats_json(): any;
     wheel(delta_y: number, x: number, y: number, _ctrl_key: boolean): void;
     zoom_to_box(start_x: number, start_y: number, end_x: number, end_y: number): void;
 }
@@ -53,8 +55,10 @@ export class VectorMapEngine {
     remove_marker_lon_lat(_lon: number, _lat: number): void;
     remove_recent_markers(_count: number): void;
     resize(width: number, height: number, dpr: number): void;
+    set_perf_debug_enabled(enabled: boolean): void;
     set_tile_url_template(template: string): void;
     set_view(lon: number, lat: number, zoom: number): void;
+    take_perf_stats_json(): any;
     wheel(delta_y: number, x: number, y: number, _ctrl_key: boolean): void;
     zoom_to_box(start_x: number, start_y: number, end_x: number, end_y: number): void;
 }
@@ -90,8 +94,10 @@ export interface InitOutput {
     readonly mapengine_remove_marker_lon_lat: (a: number, b: number, c: number) => void;
     readonly mapengine_remove_recent_markers: (a: number, b: number) => void;
     readonly mapengine_resize: (a: number, b: number, c: number, d: number) => void;
+    readonly mapengine_set_perf_debug_enabled: (a: number, b: number) => void;
     readonly mapengine_set_tile_url_template: (a: number, b: number, c: number) => void;
     readonly mapengine_set_view: (a: number, b: number, c: number, d: number) => void;
+    readonly mapengine_take_perf_stats_json: (a: number) => [number, number, number];
     readonly mapengine_wheel: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly mapengine_zoom_to_box: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly vectormapengine_add_marker_lon_lat: (a: number, b: number, c: number) => void;
@@ -109,13 +115,15 @@ export interface InitOutput {
     readonly vectormapengine_pointer_move: (a: number, b: number, c: number) => void;
     readonly vectormapengine_pointer_up: (a: number, b: number, c: number) => void;
     readonly vectormapengine_project_lon_lat: (a: number, b: number, c: number) => [number, number, number];
-    readonly vectormapengine_remove_recent_markers: (a: number, b: number) => void;
     readonly vectormapengine_resize: (a: number, b: number, c: number, d: number) => void;
+    readonly vectormapengine_set_perf_debug_enabled: (a: number, b: number) => void;
     readonly vectormapengine_set_tile_url_template: (a: number, b: number, c: number) => void;
     readonly vectormapengine_set_view: (a: number, b: number, c: number, d: number) => void;
+    readonly vectormapengine_take_perf_stats_json: (a: number) => [number, number, number];
     readonly vectormapengine_wheel: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly vectormapengine_zoom_to_box: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly vectormapengine_load_trajectory_csv: (a: number, b: number, c: number) => [number, number, number];
+    readonly vectormapengine_remove_recent_markers: (a: number, b: number) => void;
     readonly vectormapengine_remove_marker_lon_lat: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__closure__destroy__h83ed2f27720389ea: (a: number, b: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hf61daddeb0e223da: (a: number, b: number, c: any) => void;
