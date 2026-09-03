@@ -225,7 +225,6 @@ export function MapView() {
       ], { padding: 32, duration: 450, essential: true });
     }
     setZoomSelection(null);
-    setAreaZoomEnabled(false);
   }
 
   return (
