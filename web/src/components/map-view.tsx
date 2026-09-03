@@ -2,7 +2,7 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { Copy, Download, Eye, EyeOff, Ruler, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Ruler, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, MutableRefObject } from "react";
@@ -40,6 +40,8 @@ export function MapView() {
   const [measurementPoints, setMeasurementPoints] = useState<Coordinate[]>([]);
   const [cursorPoint, setCursorPoint] = useState<Coordinate | null>(null);
   const [selectedPoint, setSelectedPoint] = useState<TrajectoryPoint | null>(null);
+  const [pointCardPosition, setPointCardPosition] = useState({ x: 0, y: 0 });
+  const [expandedTrajectoryId, setExpandedTrajectoryId] = useState<string | null>(null);
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
 
   useEffect(() => {
@@ -128,6 +130,21 @@ export function MapView() {
     syncMeasurement(map, markerRef, coordinates);
   }, [cursorPoint, measurementEnabled, measurementPoints]);
 
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !selectedPoint) return;
+
+    const updatePosition = () => {
+      const point = map.project(selectedPoint.coordinate);
+      setPointCardPosition({ x: point.x, y: point.y });
+    };
+    updatePosition();
+    map.on("move", updatePosition);
+    return () => {
+      map.off("move", updatePosition);
+    };
+  }, [selectedPoint]);
+
   async function importFiles(files: File[]) {
     const imported = (await Promise.all(files.map(async (file) => {
       const csv = await file.text();
@@ -148,6 +165,14 @@ export function MapView() {
       if (map) fitTrajectories(map, next);
       return next;
     });
+  }
+
+  function selectTrajectoryPoint(point: TrajectoryPoint) {
+    const map = mapRef.current;
+    setSelectedPoint(point);
+    if (map) {
+      map.easeTo({ center: point.coordinate, zoom: Math.max(map.getZoom(), 16), duration: 650, essential: true });
+    }
   }
 
   return (
@@ -175,41 +200,69 @@ export function MapView() {
       </Button>
       {trajectories.length > 0 && (
         <aside className="trajectory-card">
-          {trajectories.map((trajectory) => (
-            <div className="trajectory-row" key={trajectory.id}>
-              <span className="trajectory-name" title={trajectory.name}>{trajectory.name}</span>
-              <Button
-                aria-label={`Download ${trajectory.name}`}
-                className="icon-button"
-                onClick={() => downloadTrajectory(trajectory)}
-                type="button"
-              >
-                <Download size={16} />
-              </Button>
-              <Button
-                aria-label={trajectory.visible ? `Hide ${trajectory.name}` : `Show ${trajectory.name}`}
-                className="icon-button"
-                onClick={() => setTrajectories((current) => current.map((item) =>
-                  item.id === trajectory.id ? { ...item, visible: !item.visible } : item,
-                ))}
-                type="button"
-              >
-                {trajectory.visible ? <Eye size={16} /> : <EyeOff size={16} />}
-              </Button>
-              <Button
-                aria-label={`Delete ${trajectory.name}`}
-                className="icon-button"
-                onClick={() => setTrajectories((current) => current.filter((item) => item.id !== trajectory.id))}
-                type="button"
-              >
-                <Trash2 size={16} />
-              </Button>
-            </div>
-          ))}
+          {trajectories.map((trajectory) => {
+            const expanded = expandedTrajectoryId === trajectory.id;
+            return (
+              <div className="trajectory-item" key={trajectory.id}>
+                <div className="trajectory-row">
+                  <Button
+                    aria-expanded={expanded}
+                    aria-label={`${expanded ? "Collapse" : "Expand"} ${trajectory.name}`}
+                    className="icon-button"
+                    onClick={() => setExpandedTrajectoryId((id) => id === trajectory.id ? null : trajectory.id)}
+                    type="button"
+                  >
+                    {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  </Button>
+                  <span className="trajectory-name">{trajectory.name}</span>
+                  <Button
+                    aria-label={`Download ${trajectory.name}`}
+                    className="icon-button"
+                    onClick={() => downloadTrajectory(trajectory)}
+                    type="button"
+                  >
+                    <Download size={16} />
+                  </Button>
+                  <Button
+                    aria-label={trajectory.visible ? `Hide ${trajectory.name}` : `Show ${trajectory.name}`}
+                    className="icon-button"
+                    onClick={() => setTrajectories((current) => current.map((item) =>
+                      item.id === trajectory.id ? { ...item, visible: !item.visible } : item,
+                    ))}
+                    type="button"
+                  >
+                    {trajectory.visible ? <Eye size={16} /> : <EyeOff size={16} />}
+                  </Button>
+                  <Button
+                    aria-label={`Delete ${trajectory.name}`}
+                    className="icon-button"
+                    onClick={() => setTrajectories((current) => current.filter((item) => item.id !== trajectory.id))}
+                    type="button"
+                  >
+                    <Trash2 size={16} />
+                  </Button>
+                </div>
+                <div className={`trajectory-points ${expanded ? "is-expanded" : ""}`}>
+                  <div className="trajectory-points-scroll">
+                    {trajectory.points.map((point, index) => (
+                      <Button
+                        className="trajectory-point-row"
+                        key={`${point.timestamp}-${index}`}
+                        onClick={() => selectTrajectoryPoint(point)}
+                        type="button"
+                      >
+                        {point.timestamp}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </aside>
       )}
       {selectedPoint && (
-        <aside className="point-card">
+        <aside className="point-card" style={{ left: pointCardPosition.x, top: pointCardPosition.y }}>
           <CopyValue label={`${selectedPoint.latitude}, ${selectedPoint.longitude}`} />
           <CopyValue label={selectedPoint.timestamp} />
           <CopyValue label={new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(selectedPoint.timestamp))} />
