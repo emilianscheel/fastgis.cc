@@ -2,7 +2,7 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, Ruler, ScanSearch, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, ReceiptEuro, Ruler, ScanSearch, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
@@ -55,11 +55,12 @@ export function MapView() {
   const [selectedPoint, setSelectedPoint] = useState<TrajectoryPoint | null>(null);
   const [pointCardPosition, setPointCardPosition] = useState({ x: 0, y: 0 });
   const [expandedTrajectoryId, setExpandedTrajectoryId] = useState<string | null>(null);
+  const [receiptTrajectoryId, setReceiptTrajectoryId] = useState<string | null>(null);
   const [areaZoomEnabled, setAreaZoomEnabled] = useState(false);
   const [zoomSelection, setZoomSelection] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [tollSettings, setTollSettings] = useState<Record<string, TollSettings>>({});
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
-  const expandedTrajectory = trajectories.find((trajectory) => trajectory.id === expandedTrajectoryId);
+  const receiptTrajectory = trajectories.find((trajectory) => trajectory.id === receiptTrajectoryId);
 
   useEffect(() => {
     const animationFrame = window.requestAnimationFrame(() => {
@@ -318,6 +319,15 @@ export function MapView() {
                   </Button>
                   <span className="trajectory-name">{trajectory.name}</span>
                   <Button
+                    aria-label={`Open toll receipt for ${trajectory.name}`}
+                    aria-pressed={receiptTrajectoryId === trajectory.id}
+                    className="icon-button receipt-toggle"
+                    onClick={() => setReceiptTrajectoryId((id) => id === trajectory.id ? null : trajectory.id)}
+                    type="button"
+                  >
+                    <ReceiptEuro size={16} />
+                  </Button>
+                  <Button
                     aria-label={`Download ${trajectory.name}`}
                     className="icon-button"
                     onClick={() => downloadTrajectory(trajectory)}
@@ -352,12 +362,12 @@ export function MapView() {
           })}
         </aside>
       )}
-      {expandedTrajectory && (
+      {receiptTrajectory && (
         <TollCard
           className="floating-toll-card"
-          settings={tollSettings[expandedTrajectory.id] ?? { axles: 2, emissionClass: 0 }}
-          trajectory={expandedTrajectory}
-          onChange={(settings) => setTollSettings((current) => ({ ...current, [expandedTrajectory.id]: settings }))}
+          settings={tollSettings[receiptTrajectory.id] ?? { axles: 2, emissionClass: 0 }}
+          trajectory={receiptTrajectory}
+          onChange={(settings) => setTollSettings((current) => ({ ...current, [receiptTrajectory.id]: settings }))}
           style={{ left: `${trajectoryPanelWidth(trajectories) + 24}px` }}
         />
       )}

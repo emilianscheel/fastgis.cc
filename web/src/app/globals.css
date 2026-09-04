@@ -373,6 +373,10 @@ button {
   background: var(--panel-hover);
 }
 
+.receipt-toggle[aria-pressed="true"] {
+  background: var(--panel-hover);
+}
+
 .map-tool-button {
   position: absolute;
   display: flex;
