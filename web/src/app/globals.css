@@ -6,6 +6,8 @@
   --panel-border: rgb(17 24 39 / 12%);
   --panel-hover: rgb(17 24 39 / 8%);
   --panel-text: #1f2937;
+  --tool-glow: rgb(82 82 91 / 20%);
+  --tool-hover: rgb(17 24 39 / 4%);
 }
 
 .dark {
@@ -13,6 +15,8 @@
   --panel-border: rgb(255 255 255 / 14%);
   --panel-hover: rgb(255 255 255 / 10%);
   --panel-text: #f4f4f5;
+  --tool-glow: rgb(161 161 170 / 20%);
+  --tool-hover: rgb(255 255 255 / 5%);
 }
 
 * {
@@ -374,8 +378,8 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  top: 76px;
-  right: 12px;
+  top: 84px;
+  right: 10px;
   z-index: 1;
   width: 29px;
   height: 29px;
@@ -391,20 +395,27 @@ button {
 
 .map-tool-button svg {
   display: block;
-  margin-left: 2px;
+  margin: 0 2px 0 0;
 }
 
 .map-tool-button[aria-pressed="true"] {
-  background: var(--panel-hover);
+  background: var(--tool-hover);
+  box-shadow: 0 0 0 4px var(--tool-glow), 0 2px 8px rgb(0 0 0 / 12%);
+}
+
+.map-tool-button:hover {
+  background: var(--tool-hover);
 }
 
 .map-tool-button:focus-visible {
+  background: var(--tool-hover);
   outline: 2px solid #71717a;
   outline-offset: 0;
+  box-shadow: 0 0 0 4px var(--tool-glow), 0 2px 8px rgb(0 0 0 / 12%);
 }
 
 .area-zoom-button {
-  top: 109px;
+  top: 123px;
 }
 
 .area-zoom-overlay {
