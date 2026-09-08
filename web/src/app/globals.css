@@ -120,8 +120,7 @@ button {
 }
 
 .trajectory-name {
-  flex: 1;
-  min-width: 0;
+  flex: 0 0 auto;
   font: 500 13px/1.25 ui-sans-serif, system-ui, sans-serif;
   white-space: nowrap;
 }

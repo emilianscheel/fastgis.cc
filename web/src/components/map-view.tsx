@@ -772,6 +772,10 @@ function trajectoryPanelWidth(trajectories: Trajectory[]) {
       40 + 8 + point.timestamp.length * 7.25 + 8 + point.latitude.length * 7.25 + 8 + point.longitude.length * 7.25,
     )),
   );
-  const fileWidth = Math.max(...trajectories.map((trajectory) => 28 + trajectory.name.length * 7.25 + 84));
+  const fileWidth = Math.max(
+    ...trajectories.map((trajectory) =>
+      12 + 5 * 28 + 4 * 2 + trajectory.name.length * 9,
+    ),
+  );
   return Math.min(window.innerWidth - 24, Math.ceil(Math.max(pointWidth, fileWidth)));
 }
