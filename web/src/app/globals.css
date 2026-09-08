@@ -414,7 +414,7 @@ button {
   align-items: center;
   justify-content: center;
   top: 84px;
-  right: 10px;
+  right: 11px;
   z-index: 1;
   width: 29px;
   height: 29px;
@@ -448,7 +448,7 @@ button {
 }
 
 .area-zoom-button {
-  top: 123px;
+  top: 127px;
 }
 
 .area-zoom-overlay {
