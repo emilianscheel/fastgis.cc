@@ -26,6 +26,8 @@ const WORKER_URL = "/maplibre/maplibre-gl-worker.mjs";
 const TRAJECTORY_SOURCE = "trajectories";
 const TRAJECTORY_LINE_LAYER = "trajectory-lines";
 const TRAJECTORY_POINT_LAYER = "trajectory-points";
+const LINK_ROUTE_LAYER = "link-routes";
+const LINK_ROUTE_HIT_LAYER = "link-route-hit-area";
 const MEASUREMENT_SOURCE = "measurement";
 const MAX_LEGEND_SPEED = 130;
 const EMISSION_CLASSES = [
@@ -45,6 +47,7 @@ export function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markerRef = useRef<maplibregl.Marker | null>(null);
+  const linkTooltipRef = useRef<maplibregl.Popup | null>(null);
   const routesRef = useRef<RouteItem[]>([]);
   const measurementEnabledRef = useRef(false);
   const measurementPointsRef = useRef<Coordinate[]>([]);
@@ -96,6 +99,12 @@ export function MapView() {
         map.on("mouseleave", TRAJECTORY_POINT_LAYER, () => {
           map.getCanvas().style.cursor = measurementEnabledRef.current ? "crosshair" : "";
         });
+        map.on("mouseenter", LINK_ROUTE_HIT_LAYER, () => {
+          map.getCanvas().style.cursor = "pointer";
+        });
+        map.on("mouseleave", LINK_ROUTE_HIT_LAYER, () => {
+          map.getCanvas().style.cursor = measurementEnabledRef.current ? "crosshair" : "";
+        });
       });
       map.on("moveend", () => {
         const center = map.getCenter();
@@ -105,8 +114,27 @@ export function MapView() {
       map.on("click", (event) => {
         if (!measurementEnabledRef.current) {
           const properties = map.queryRenderedFeatures(event.point, { layers: [TRAJECTORY_POINT_LAYER] })[0]?.properties;
-          if (!properties) {
+          const link = map.queryRenderedFeatures(event.point, { layers: [LINK_ROUTE_HIT_LAYER, LINK_ROUTE_LAYER] })[0];
+          if (!properties && !link) {
             setSelectedPoint(null);
+            linkTooltipRef.current?.remove();
+            return;
+          }
+          if (!properties && link) {
+            const linkProperties = link.properties;
+            linkTooltipRef.current?.remove();
+            linkTooltipRef.current = new maplibregl.Popup({
+              anchor: event.point.x < map.getCanvas().clientWidth / 2 ? "bottom-left" : "bottom-right",
+              closeButton: false,
+              closeOnClick: false,
+              className: "link-tooltip-popup",
+              maxWidth: "none",
+              offset: 10,
+            });
+            linkTooltipRef.current
+              .setLngLat(event.lngLat)
+              .setDOMContent(createLinkTooltip(linkProperties.linkId, parseLinkMetadata(linkProperties.metadata)))
+              .addTo(map);
             return;
           }
           setSelectedPoint({
@@ -132,6 +160,8 @@ export function MapView() {
 
     return () => {
       window.cancelAnimationFrame(animationFrame);
+      linkTooltipRef.current?.remove();
+      linkTooltipRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -215,6 +245,17 @@ export function MapView() {
     if (map) {
       map.easeTo({ center: point.coordinate, zoom: Math.max(map.getZoom(), 16), duration: 650, essential: true });
     }
+  }
+
+  function selectLinkRouteWay(route: LinkRoute, linkId: string) {
+    const way = route.ways.find((candidate) => candidate.id === linkId);
+    const map = mapRef.current;
+    if (!way || !map) return;
+    const bounds = way.coordinates.reduce(
+      (result, coordinate) => result.extend(coordinate),
+      new maplibregl.LngLatBounds(way.coordinates[0], way.coordinates[0]),
+    );
+    map.fitBounds(bounds, { padding: 80, maxZoom: 17, duration: 650, essential: true });
   }
 
   function startAreaZoom(event: MouseEvent<HTMLDivElement>) {
@@ -367,7 +408,7 @@ export function MapView() {
                 <div className={`trajectory-points ${expanded ? "is-expanded" : ""}`}>
                   {route.kind === "trajectory"
                     ? <TrajectoryPointList points={route.points} onSelect={selectTrajectoryPoint} />
-                    : <LinkIdList linkIds={route.linkIds} />}
+                    : <LinkIdList linkIds={route.linkIds} onSelect={(linkId) => selectLinkRouteWay(route, linkId)} />}
                 </div>
               </div>
             );
@@ -434,7 +475,7 @@ function syncRoutes(map: maplibregl.Map, routes: RouteItem[], pointColor: string
     features: routes.filter((route): route is LinkRoute => route.visible && route.kind === "links").flatMap((route) =>
       route.ways.map((way) => ({
         type: "Feature" as const,
-        properties: { color: "#facc15" },
+        properties: { color: "#facc15", linkId: way.id, metadata: JSON.stringify(way.metadata ?? {}) },
         geometry: { type: "LineString" as const, coordinates: way.coordinates },
       })),
     ),
@@ -480,10 +521,18 @@ function syncRoutes(map: maplibregl.Map, routes: RouteItem[], pointColor: string
       paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.9 },
     });
     map.addLayer({
-      id: "link-routes",
+      id: LINK_ROUTE_HIT_LAYER,
       type: "line",
       source: TRAJECTORY_SOURCE,
-      filter: ["all", ["==", "$type", "LineString"], ["==", ["get", "color"], "#facc15"]],
+      filter: ["all", ["==", ["geometry-type"], "LineString"], ["==", ["get", "color"], "#facc15"]],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#facc15", "line-width": 18, "line-opacity": 0 },
+    });
+    map.addLayer({
+      id: LINK_ROUTE_LAYER,
+      type: "line",
+      source: TRAJECTORY_SOURCE,
+      filter: ["all", ["==", ["geometry-type"], "LineString"], ["==", ["get", "color"], "#facc15"]],
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": "#facc15", "line-width": 5, "line-opacity": 0.95 },
     });
@@ -504,6 +553,69 @@ function SpeedLegend() {
       <span>0 km/h</span>
     </aside>
   );
+}
+
+function parseLinkMetadata(value: string | undefined) {
+  try {
+    const metadata = JSON.parse(value ?? "{}");
+    return typeof metadata === "object" && metadata !== null ? metadata as Record<string, string> : {};
+  } catch {
+    return {};
+  }
+}
+
+function createLinkTooltip(linkId: string | undefined, metadata: Record<string, string>) {
+  const tooltip = document.createElement("div");
+  tooltip.className = "link-tooltip";
+  const entries = [
+    ["OSM", linkId ?? ""],
+    ["Name", metadata.name],
+    ["Ref", metadata.ref],
+    ["Road", metadata.highway],
+    ["Speed", metadata.maxspeed],
+  ].filter(([, value]) => value);
+  for (const [label, value] of entries) {
+    const row = document.createElement("div");
+    const detail = document.createElement("span");
+    row.className = "point-value";
+    detail.textContent = `${label}: ${value}`;
+    row.append(detail, createCopyButton(value));
+    tooltip.append(row);
+  }
+  return tooltip;
+}
+
+function createCopyButton(value: string) {
+  const button = document.createElement("button");
+  button.className = "icon-button";
+  button.type = "button";
+  button.ariaLabel = `Copy ${value}`;
+  button.append(createCopyIcon());
+  button.addEventListener("click", () => void navigator.clipboard.writeText(value));
+  return button;
+}
+
+function createCopyIcon() {
+  const namespace = "http://www.w3.org/2000/svg";
+  const icon = document.createElementNS(namespace, "svg");
+  icon.setAttribute("width", "15");
+  icon.setAttribute("height", "15");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("fill", "none");
+  icon.setAttribute("stroke", "currentColor");
+  icon.setAttribute("stroke-width", "2");
+  icon.setAttribute("stroke-linecap", "round");
+  icon.setAttribute("stroke-linejoin", "round");
+  const elements: Array<[string, Record<string, string>]> = [
+    ["rect", { width: "14", height: "14", x: "8", y: "8", rx: "2", ry: "2" }],
+    ["path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" }],
+  ];
+  for (const [tag, attributes] of elements) {
+    const element = document.createElementNS(namespace, tag);
+    for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+    icon.append(element);
+  }
+  return icon;
 }
 
 function syncMeasurement(
@@ -781,7 +893,7 @@ function TrajectoryPointList({
   );
 }
 
-function LinkIdList({ linkIds }: { linkIds: string[] }) {
+function LinkIdList({ linkIds, onSelect }: { linkIds: string[]; onSelect: (linkId: string) => void }) {
   const [scrollTop, setScrollTop] = useState(0);
   const firstVisibleIndex = Math.max(0, Math.floor(scrollTop / POINT_ROW_HEIGHT) - 2);
   const visibleIds = linkIds.slice(firstVisibleIndex, firstVisibleIndex + VISIBLE_POINT_ROWS + 4);
@@ -800,9 +912,9 @@ function LinkIdList({ linkIds }: { linkIds: string[] }) {
               <div className="link-id-row" key={`${linkId}-${index}`}>
                 <span className="trajectory-point-line">{index + 2}</span>
                 <Button
-                  aria-label={`Copy OpenStreetMap link ${linkId}`}
+                  aria-label={`Show OpenStreetMap link ${linkId}`}
                   className="trajectory-point-cell"
-                  onClick={() => void navigator.clipboard.writeText(linkId)}
+                  onClick={() => onSelect(linkId)}
                   type="button"
                 >
                   {linkId}

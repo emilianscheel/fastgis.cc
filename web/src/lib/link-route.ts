@@ -3,6 +3,7 @@ import type { Coordinate } from "@/lib/trajectory";
 export type ResolvedOsmWay = {
   id: string;
   coordinates: Coordinate[];
+  metadata: Record<string, string>;
 };
 
 const LINK_ID_HEADERS = new Set(["linkid", "link", "wayid", "way", "osmwayid", "osmid"]);
@@ -34,7 +35,7 @@ export async function resolveOsmWays(linkIds: string[]): Promise<ResolvedOsmWay[
 
   return ways.flatMap((way) => {
     const geometry = way.nodeIds.map((nodeId) => coordinates.get(nodeId)).filter((coordinate): coordinate is Coordinate => coordinate !== undefined);
-    return geometry.length > 1 ? [{ id: way.id, coordinates: geometry }] : [];
+    return geometry.length > 1 ? [{ id: way.id, coordinates: geometry, metadata: way.metadata }] : [];
   });
 }
 
@@ -66,7 +67,7 @@ function parseWayReferences(xml: string) {
     const nodeIds = [...match[2].matchAll(/<nd\b([^>]*)\/>/g)]
       .map((node) => xmlAttribute(node[1], "ref"))
       .filter((nodeId): nodeId is string => nodeId !== null);
-    return id && nodeIds.length > 1 ? [{ id, nodeIds }] : [];
+    return id && nodeIds.length > 1 ? [{ id, nodeIds, metadata: parseOsmTags(match[2]) }] : [];
   });
 }
 
@@ -81,4 +82,12 @@ function parseNodes(xml: string, coordinates: Map<string, Coordinate>) {
 
 function xmlAttribute(source: string, name: string) {
   return new RegExp(`\\b${name}="([^"]*)"`).exec(source)?.[1] ?? null;
+}
+
+function parseOsmTags(source: string) {
+  return Object.fromEntries([...source.matchAll(/<tag\b([^>]*)\/>/g)].flatMap((match) => {
+    const key = xmlAttribute(match[1], "k");
+    const value = xmlAttribute(match[1], "v");
+    return key && value ? [[key, value]] : [];
+  }));
 }

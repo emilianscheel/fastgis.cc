@@ -371,6 +371,36 @@ button {
   white-space: nowrap;
 }
 
+.link-tooltip-popup .maplibregl-popup-content {
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 12%);
+  color: var(--panel-text);
+  font: 500 13px/1.25 ui-sans-serif, system-ui, sans-serif;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  overflow: hidden;
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.link-tooltip-popup .maplibregl-popup-tip {
+  border-top-color: var(--panel);
+  border-bottom-color: var(--panel);
+}
+
+.link-tooltip {
+  display: grid;
+  min-width: 270px;
+  gap: 0;
+}
+
+.link-tooltip .point-value {
+  padding: 5px 6px 5px 10px;
+}
+
 .trajectory-point-line {
   color: color-mix(in srgb, var(--panel-text) 45%, transparent);
   padding-left: 8px;
