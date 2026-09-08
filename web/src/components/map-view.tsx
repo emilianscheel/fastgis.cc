@@ -322,41 +322,43 @@ export function MapView() {
                     {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                   </Button>
                   <span className="trajectory-name">{trajectory.name}</span>
-                  <Button
-                    aria-label={`Open toll receipt for ${trajectory.name}`}
-                    aria-pressed={receiptTrajectoryId === trajectory.id}
-                    className="icon-button receipt-toggle"
-                    onClick={() => setReceiptTrajectoryId((id) => id === trajectory.id ? null : trajectory.id)}
-                    type="button"
-                  >
-                    <ReceiptEuro size={16} />
-                  </Button>
-                  <Button
-                    aria-label={`Download ${trajectory.name}`}
-                    className="icon-button"
-                    onClick={() => downloadTrajectory(trajectory)}
-                    type="button"
-                  >
-                    <Download size={16} />
-                  </Button>
-                  <Button
-                    aria-label={trajectory.visible ? `Hide ${trajectory.name}` : `Show ${trajectory.name}`}
-                    className="icon-button"
-                    onClick={() => setTrajectories((current) => current.map((item) =>
-                      item.id === trajectory.id ? { ...item, visible: !item.visible } : item,
-                    ))}
-                    type="button"
-                  >
-                    {trajectory.visible ? <Eye size={16} /> : <EyeOff size={16} />}
-                  </Button>
-                  <Button
-                    aria-label={`Delete ${trajectory.name}`}
-                    className="icon-button"
-                    onClick={() => setTrajectories((current) => current.filter((item) => item.id !== trajectory.id))}
-                    type="button"
-                  >
-                    <Trash2 size={16} />
-                  </Button>
+                  <div className="trajectory-actions">
+                    <Button
+                      aria-label={`Open toll receipt for ${trajectory.name}`}
+                      aria-pressed={receiptTrajectoryId === trajectory.id}
+                      className="icon-button receipt-toggle"
+                      onClick={() => setReceiptTrajectoryId((id) => id === trajectory.id ? null : trajectory.id)}
+                      type="button"
+                    >
+                      <ReceiptEuro size={16} />
+                    </Button>
+                    <Button
+                      aria-label={`Download ${trajectory.name}`}
+                      className="icon-button"
+                      onClick={() => downloadTrajectory(trajectory)}
+                      type="button"
+                    >
+                      <Download size={16} />
+                    </Button>
+                    <Button
+                      aria-label={trajectory.visible ? `Hide ${trajectory.name}` : `Show ${trajectory.name}`}
+                      className="icon-button"
+                      onClick={() => setTrajectories((current) => current.map((item) =>
+                        item.id === trajectory.id ? { ...item, visible: !item.visible } : item,
+                      ))}
+                      type="button"
+                    >
+                      {trajectory.visible ? <Eye size={16} /> : <EyeOff size={16} />}
+                    </Button>
+                    <Button
+                      aria-label={`Delete ${trajectory.name}`}
+                      className="icon-button"
+                      onClick={() => setTrajectories((current) => current.filter((item) => item.id !== trajectory.id))}
+                      type="button"
+                    >
+                      <Trash2 size={16} />
+                    </Button>
+                  </div>
                 </div>
                 <div className={`trajectory-points ${expanded ? "is-expanded" : ""}`}>
                   <TrajectoryPointList points={trajectory.points} onSelect={selectTrajectoryPoint} />
@@ -439,21 +441,20 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
   else {
     map.addSource(TRAJECTORY_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [...lines.features, ...points.features] } });
     map.addLayer({
-      id: TRAJECTORY_LINE_LAYER,
-      type: "line",
-      source: TRAJECTORY_SOURCE,
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.9 },
-    });
-    map.addLayer({
       id: TRAJECTORY_POINT_LAYER,
       type: "circle",
       source: TRAJECTORY_SOURCE,
       filter: ["==", "$type", "Point"],
       paint: { "circle-radius": 3.5, "circle-color": "#000000" },
     });
+    map.addLayer({
+      id: TRAJECTORY_LINE_LAYER,
+      type: "line",
+      source: TRAJECTORY_SOURCE,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.9 },
+    });
   }
-
 }
 
 function speedColor(speed: number) {

@@ -94,7 +94,8 @@ function parsePoint(cells: string[], indexes: ColumnIndexes): TrajectoryPoint[] 
   const latitude = cells[indexes.latitude];
   const longitude = cells[indexes.longitude];
   if (!latitude || !longitude || !isLatitude(latitude) || !isLongitude(longitude)) return [];
-  const speed = indexes.speed === undefined ? undefined : Number(cells[indexes.speed]);
+  const speedMetersPerSecond = indexes.speed === undefined ? undefined : Number(cells[indexes.speed]);
+  const speed = speedMetersPerSecond === undefined ? undefined : Number((speedMetersPerSecond * 3.6).toFixed(2));
   const direction = indexes.direction === undefined ? undefined : Number(cells[indexes.direction]);
   return [{
     timestamp: indexes.timestamp === undefined ? "" : cells[indexes.timestamp] ?? "",

@@ -125,6 +125,13 @@ button {
   white-space: nowrap;
 }
 
+.trajectory-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-left: auto;
+}
+
 .trajectory-points {
   max-height: 0;
   overflow: hidden;

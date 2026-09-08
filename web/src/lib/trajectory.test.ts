@@ -28,7 +28,7 @@ test("rejects CSV files without coordinate headers", () => {
 });
 
 test("detects semicolon-delimited TollNow trajectories with speed metadata", () => {
-  expect(parseTrajectory("TIME;LAT;LON;DIRECTION;SPEED\n2026-09-02T08:03:53;52.375409;13.168512;999.9;0")).toEqual([
+  expect(parseTrajectory("TIME;LAT;LON;DIRECTION;SPEED\n2026-09-02T08:03:53;52.375409;13.168512;999.9;0\n2026-09-02T08:04:05;52.375396;13.168499;210;1.86")).toEqual([
     {
       timestamp: "2026-09-02T08:03:53",
       latitude: "52.375409",
@@ -36,6 +36,14 @@ test("detects semicolon-delimited TollNow trajectories with speed metadata", () 
       coordinate: [13.168512, 52.375409],
       direction: 999.9,
       speed: 0,
+    },
+    {
+      timestamp: "2026-09-02T08:04:05",
+      latitude: "52.375396",
+      longitude: "13.168499",
+      coordinate: [13.168499, 52.375396],
+      direction: 210,
+      speed: 6.7,
     },
   ]);
 });
