@@ -590,7 +590,7 @@ function TollCard({
     <section className={["toll-card", className].filter(Boolean).join(" ")} style={style}>
       <div className="toll-row">
         <span>Base</span>
-        <span>{kilometers.toFixed(2)} km × €1.00</span>
+        <span>{kilometers.toFixed(2)} km<span className="toll-multiplication">×</span>€1.00</span>
         <AnimatedAmount value={formatEuro(toll.distanceCharge)} />
       </div>
       <div className="toll-row">
@@ -611,7 +611,7 @@ function TollCard({
             </AnimatePresence>
           </span>
           <Button aria-label="Increase axles" className="toll-icon-button" onClick={() => onChange({ ...settings, axles: settings.axles + 1 })} type="button"><Plus size={14} /></Button>
-          <span className="toll-rate">× €0.20</span>
+          <span className="toll-rate"><span className="toll-multiplication">×</span>€0.20</span>
         </span>
         <AnimatedAmount value={formatEuro(toll.axleCharge)} />
       </div>
