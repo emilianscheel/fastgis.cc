@@ -6,11 +6,8 @@ export type ResolvedOsmWay = {
 };
 
 const LINK_ID_HEADERS = new Set(["linkid", "link", "wayid", "way", "osmwayid", "osmid"]);
-const OVERPASS_URLS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-];
-const WAY_BATCH_SIZE = 50;
+const OSM_API_URL = "https://api.openstreetmap.org/api/0.6";
+const NODE_BATCH_SIZE = 250;
 
 export function parseLinkIds(content: string): string[] | null {
   const values = content.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -23,41 +20,51 @@ export function parseLinkIds(content: string): string[] | null {
 }
 
 export async function resolveOsmWays(linkIds: string[]): Promise<ResolvedOsmWay[]> {
-  const requestedIds = [...new Set(linkIds)];
-  const ways: ResolvedOsmWay[] = [];
-  for (const ids of chunk(requestedIds, WAY_BATCH_SIZE)) ways.push(...await fetchWayBatch(ids));
-  return ways;
+  const requestedIds = [...new Set(linkIds)].join(",");
+  const wayXml = await fetchXml(`${OSM_API_URL}/ways?ways=${requestedIds}`);
+  const ways = parseWayReferences(wayXml);
+  const nodeIds = [...new Set(ways.flatMap((way) => way.nodeIds))];
+  const coordinates = new Map<string, Coordinate>();
+
+  for (const ids of chunk(nodeIds, NODE_BATCH_SIZE)) {
+    parseNodes(await fetchXml(`${OSM_API_URL}/nodes?nodes=${ids.join(",")}`), coordinates);
+  }
+
+  return ways.flatMap((way) => {
+    const geometry = way.nodeIds.map((nodeId) => coordinates.get(nodeId)).filter((coordinate): coordinate is Coordinate => coordinate !== undefined);
+    return geometry.length > 1 ? [{ id: way.id, coordinates: geometry }] : [];
+  });
 }
 
-async function fetchWayBatch(ids: string[]): Promise<ResolvedOsmWay[]> {
-  const query = `[out:json][timeout:60];way(id:${ids.join(",")});out geom;`;
-  let failure: Error | null = null;
-  for (const url of OVERPASS_URLS) {
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        body: new URLSearchParams({ data: query }),
-      });
-      if (!response.ok) throw new Error(`${response.status}`);
-      const payload = await response.json() as OverpassResponse;
-      return payload.elements.flatMap((way) => {
-        const coordinates = way.geometry.map((point) => [point.lon, point.lat] as Coordinate);
-        return coordinates.length > 1 ? [{ id: String(way.id), coordinates }] : [];
-      });
-    } catch (error) {
-      failure = error instanceof Error ? error : new Error("Unknown request failure");
-    }
-  }
-  throw new Error(`OpenStreetMap way lookup failed: ${failure?.message ?? "no available endpoint"}`);
+async function fetchXml(url: string) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`OpenStreetMap way lookup failed (${response.status})`);
+  return response.text();
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
   return Array.from({ length: Math.ceil(items.length / size) }, (_, index) => items.slice(index * size, (index + 1) * size));
 }
 
-type OverpassResponse = {
-  elements: Array<{
-    id: number;
-    geometry: Array<{ lat: number; lon: number }>;
-  }>;
-};
+function parseWayReferences(xml: string) {
+  return [...xml.matchAll(/<way\b([^>]*)>([\s\S]*?)<\/way>/g)].flatMap((match) => {
+    const id = xmlAttribute(match[1], "id");
+    const nodeIds = [...match[2].matchAll(/<nd\b([^>]*)\/>/g)]
+      .map((node) => xmlAttribute(node[1], "ref"))
+      .filter((nodeId): nodeId is string => nodeId !== null);
+    return id && nodeIds.length > 1 ? [{ id, nodeIds }] : [];
+  });
+}
+
+function parseNodes(xml: string, coordinates: Map<string, Coordinate>) {
+  for (const match of xml.matchAll(/<node\b([^>]*)\/>/g)) {
+    const id = xmlAttribute(match[1], "id");
+    const latitude = Number(xmlAttribute(match[1], "lat"));
+    const longitude = Number(xmlAttribute(match[1], "lon"));
+    if (id && Number.isFinite(latitude) && Number.isFinite(longitude)) coordinates.set(id, [longitude, latitude]);
+  }
+}
+
+function xmlAttribute(source: string, name: string) {
+  return new RegExp(`\\b${name}="([^"]*)"`).exec(source)?.[1] ?? null;
+}
