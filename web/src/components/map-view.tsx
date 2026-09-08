@@ -368,15 +368,24 @@ export function MapView() {
           })}
         </aside>
       )}
-      {receiptTrajectory && (
-        <TollCard
-          className="floating-toll-card"
-          settings={tollSettings[receiptTrajectory.id] ?? { axles: 2, emissionClass: 0 }}
-          trajectory={receiptTrajectory}
-          onChange={(settings) => setTollSettings((current) => ({ ...current, [receiptTrajectory.id]: settings }))}
-          style={{ left: `${trajectoryPanelWidth(trajectories) + 24}px` }}
-        />
-      )}
+      <AnimatePresence>
+        {receiptTrajectory && (
+          <motion.div
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="floating-toll-card"
+            exit={{ opacity: 0, scale: 0.96, y: -6 }}
+            initial={{ opacity: 0, scale: 0.96, y: -6 }}
+            style={{ left: `${trajectoryPanelWidth(trajectories) + 24}px` }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+          >
+            <TollCard
+              settings={tollSettings[receiptTrajectory.id] ?? { axles: 2, emissionClass: 0 }}
+              trajectory={receiptTrajectory}
+              onChange={(settings) => setTollSettings((current) => ({ ...current, [receiptTrajectory.id]: settings }))}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
       {selectedPoint && (
         <aside className="point-card" style={{ left: pointCardPosition.x, top: pointCardPosition.y }}>
           <CopyValue label={`${selectedPoint.latitude}, ${selectedPoint.longitude}`} />

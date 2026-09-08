@@ -157,6 +157,7 @@ button {
   border-radius: 6px;
   background: color-mix(in srgb, var(--panel) 80%, transparent);
   font: 500 12px/1.25 ui-sans-serif, system-ui, sans-serif;
+  backdrop-filter: blur(10px);
 }
 
 .floating-toll-card {
@@ -164,8 +165,7 @@ button {
   top: 12px;
   z-index: 1;
   width: 430px;
-  box-shadow: 0 2px 10px rgb(0 0 0 / 12%);
-  backdrop-filter: blur(10px);
+  transform-origin: top left;
 }
 
 .toll-row,
