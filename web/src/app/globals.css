@@ -384,11 +384,11 @@ button {
   overflow: hidden;
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
+  animation: tooltip-pop-in 160ms ease-out;
 }
 
 .link-tooltip-popup .maplibregl-popup-tip {
-  border-top-color: var(--panel);
-  border-bottom-color: var(--panel);
+  display: none;
 }
 
 .link-tooltip {
@@ -399,6 +399,23 @@ button {
 
 .link-tooltip .point-value {
   padding: 5px 6px 5px 10px;
+}
+
+.icon-button > span {
+  display: grid;
+  place-items: center;
+}
+
+@keyframes tooltip-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .trajectory-point-line {

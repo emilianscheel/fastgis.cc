@@ -2,9 +2,10 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, ReceiptEuro, Ruler, ScanSearch, Trash2 } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, ReceiptEuro, Ruler, ScanSearch, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { AnimatePresence, motion } from "motion/react";
+import { createRoot } from "react-dom/client";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, MouseEvent, MutableRefObject } from "react";
 import type { FeatureCollection, LineString, Point } from "geojson";
@@ -131,9 +132,11 @@ export function MapView() {
               maxWidth: "none",
               offset: 10,
             });
+            const tooltip = createLinkTooltip(linkProperties.linkId, parseLinkMetadata(linkProperties.metadata));
+            linkTooltipRef.current.once("close", tooltip.cleanup);
             linkTooltipRef.current
               .setLngLat(event.lngLat)
-              .setDOMContent(createLinkTooltip(linkProperties.linkId, parseLinkMetadata(linkProperties.metadata)))
+              .setDOMContent(tooltip.element)
               .addTo(map);
             return;
           }
@@ -433,15 +436,24 @@ export function MapView() {
           </motion.div>
         )}
       </AnimatePresence>
-      {selectedPoint && (
-        <aside className="point-card" style={{ left: pointCardPosition.x, top: pointCardPosition.y }}>
-          <CopyValue label={`${selectedPoint.latitude}, ${selectedPoint.longitude}`} />
-          <CopyValue label={selectedPoint.timestamp} />
-          <CopyValue label={new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(selectedPoint.timestamp))} />
-          {selectedPoint.speed !== undefined && <CopyValue label={`${selectedPoint.speed} km/h`} />}
-          {selectedPoint.direction !== undefined && <CopyValue label={`${selectedPoint.direction}°`} />}
-        </aside>
-      )}
+      <AnimatePresence>
+        {selectedPoint && (
+          <motion.aside
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="point-card"
+            exit={{ opacity: 0, scale: 0.96, y: -6 }}
+            initial={{ opacity: 0, scale: 0.96, y: -6 }}
+            style={{ left: pointCardPosition.x, top: pointCardPosition.y }}
+            transition={{ duration: 0.16, ease: "easeOut" }}
+          >
+            <CopyValue label={`${selectedPoint.latitude}, ${selectedPoint.longitude}`} />
+            <CopyValue label={selectedPoint.timestamp} />
+            <CopyValue label={new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(selectedPoint.timestamp))} />
+            {selectedPoint.speed !== undefined && <CopyValue label={`${selectedPoint.speed} km/h`} />}
+            {selectedPoint.direction !== undefined && <CopyValue label={`${selectedPoint.direction}°`} />}
+          </motion.aside>
+        )}
+      </AnimatePresence>
       {hasSpeedData && <SpeedLegend />}
     </main>
   );
@@ -565,57 +577,28 @@ function parseLinkMetadata(value: string | undefined) {
 }
 
 function createLinkTooltip(linkId: string | undefined, metadata: Record<string, string>) {
-  const tooltip = document.createElement("div");
-  tooltip.className = "link-tooltip";
-  const entries = [
+  const element = document.createElement("div");
+  const root = createRoot(element);
+  root.render(<LinkTooltip linkId={linkId} metadata={metadata} />);
+  return { element, cleanup: () => root.unmount() };
+}
+
+function LinkTooltip({ linkId, metadata }: { linkId: string | undefined; metadata: Record<string, string> }) {
+  const entries: Array<[string, string | undefined]> = [
     ["OSM", linkId ?? ""],
     ["Name", metadata.name],
     ["Ref", metadata.ref],
     ["Road", metadata.highway],
-    ["Speed", metadata.maxspeed],
-  ].filter(([, value]) => value);
-  for (const [label, value] of entries) {
-    const row = document.createElement("div");
-    const detail = document.createElement("span");
-    row.className = "point-value";
-    detail.textContent = `${label}: ${value}`;
-    row.append(detail, createCopyButton(value));
-    tooltip.append(row);
-  }
-  return tooltip;
-}
-
-function createCopyButton(value: string) {
-  const button = document.createElement("button");
-  button.className = "icon-button";
-  button.type = "button";
-  button.ariaLabel = `Copy ${value}`;
-  button.append(createCopyIcon());
-  button.addEventListener("click", () => void navigator.clipboard.writeText(value));
-  return button;
-}
-
-function createCopyIcon() {
-  const namespace = "http://www.w3.org/2000/svg";
-  const icon = document.createElementNS(namespace, "svg");
-  icon.setAttribute("width", "15");
-  icon.setAttribute("height", "15");
-  icon.setAttribute("viewBox", "0 0 24 24");
-  icon.setAttribute("fill", "none");
-  icon.setAttribute("stroke", "currentColor");
-  icon.setAttribute("stroke-width", "2");
-  icon.setAttribute("stroke-linecap", "round");
-  icon.setAttribute("stroke-linejoin", "round");
-  const elements: Array<[string, Record<string, string>]> = [
-    ["rect", { width: "14", height: "14", x: "8", y: "8", rx: "2", ry: "2" }],
-    ["path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" }],
-  ];
-  for (const [tag, attributes] of elements) {
-    const element = document.createElementNS(namespace, tag);
-    for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
-    icon.append(element);
-  }
-  return icon;
+    ["Max speed", metadata.maxspeed],
+    ["Target speed", metadata.target_speed ?? metadata["maxspeed:advisory"] ?? metadata["maxspeed:recommended"]],
+  ].filter((entry): entry is [string, string] => Boolean(entry[1]));
+  return (
+    <div className="link-tooltip">
+      {entries.map(([label, value]) => (
+        <CopyValue key={label} label={`${label}: ${value}`} value={value} />
+      ))}
+    </div>
+  );
 }
 
 function syncMeasurement(
@@ -840,14 +823,38 @@ async function downloadReceipt(route: RouteItem, settings: TollSettings, kilomet
   receipt.save(`${route.name.replace(/\.[^.]+$/i, "")}-toll-receipt.pdf`);
 }
 
-function CopyValue({ label }: { label: string }) {
+function CopyValue({ label, value = label }: { label: string; value?: string }) {
   return (
     <div className="point-value">
       <span>{label}</span>
-      <Button aria-label={`Copy ${label}`} className="icon-button" onClick={() => void navigator.clipboard.writeText(label)} type="button">
-        <Copy size={15} />
-      </Button>
+      <CopyButton value={value} />
     </div>
+  );
+}
+
+function CopyButton({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyValue() {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_200);
+  }
+
+  return (
+    <Button aria-label={`Copy ${value}`} className="icon-button" onClick={() => void copyValue()} type="button">
+      <AnimatePresence initial={false} mode="popLayout">
+        <motion.span
+          animate={{ opacity: 1, rotate: 0, scale: 1 }}
+          exit={{ opacity: 0, rotate: -45, scale: 0.7 }}
+          initial={{ opacity: 0, rotate: 45, scale: 0.7 }}
+          key={copied ? "copied" : "copy"}
+          transition={{ duration: 0.15, ease: "easeOut" }}
+        >
+          {copied ? <Check size={15} /> : <Copy size={15} />}
+        </motion.span>
+      </AnimatePresence>
+    </Button>
   );
 }
 
