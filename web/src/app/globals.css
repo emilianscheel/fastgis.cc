@@ -171,7 +171,7 @@ button {
 .toll-row,
 .toll-total {
   display: grid;
-  grid-template-columns: 72px 1fr 86px;
+  grid-template-columns: 84px 1fr 86px;
   align-items: center;
   gap: 8px;
 }
@@ -183,7 +183,7 @@ button {
 }
 
 .toll-row > :nth-child(2) {
-  justify-self: center;
+  justify-self: start;
 }
 
 .toll-row strong {
@@ -260,7 +260,7 @@ button {
 
 .emission-row {
   display: grid;
-  grid-template-columns: 72px 1fr 86px;
+  grid-template-columns: 84px 1fr 86px;
   align-items: center;
   gap: 8px;
   padding: 5px 0 11px;
@@ -275,7 +275,7 @@ button {
 }
 
 .emission-group {
-  justify-self: center;
+  justify-self: start;
 }
 
 .emission-button {
