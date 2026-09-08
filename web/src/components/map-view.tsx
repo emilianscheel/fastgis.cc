@@ -61,6 +61,7 @@ export function MapView() {
   const [zoomSelection, setZoomSelection] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [tollSettings, setTollSettings] = useState<Record<string, TollSettings>>({});
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
+  const trajectoryPointColor = resolvedTheme === "dark" ? "#ffffff" : "#000000";
   const receiptTrajectory = trajectories.find((trajectory) => trajectory.id === receiptTrajectoryId);
   const hasSpeedData = trajectories.some((trajectory) => trajectory.points.some((point) => point.speed !== undefined));
 
@@ -87,7 +88,7 @@ export function MapView() {
 
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       map.on("load", () => {
-        syncTrajectories(map, trajectoriesRef.current);
+        syncTrajectories(map, trajectoriesRef.current, trajectoryPointColor);
         map.on("mouseenter", TRAJECTORY_POINT_LAYER, () => {
           map.getCanvas().style.cursor = "pointer";
         });
@@ -133,15 +134,15 @@ export function MapView() {
       mapRef.current?.remove();
       mapRef.current = null;
     };
-  }, [styleUrl]);
+  }, [styleUrl, trajectoryPointColor]);
 
   useEffect(() => {
     trajectoriesRef.current = trajectories;
     const map = mapRef.current;
     if (!map?.isStyleLoaded()) return;
-    syncTrajectories(map, trajectories);
+    syncTrajectories(map, trajectories, trajectoryPointColor);
     persist(map, trajectories);
-  }, [trajectories]);
+  }, [trajectories, trajectoryPointColor]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -405,7 +406,7 @@ function persist(map: maplibregl.Map, trajectories: Trajectory[]) {
   writeSessionState({ trajectories, camera: { center: [center.lng, center.lat], zoom: map.getZoom() } });
 }
 
-function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
+function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[], pointColor: string) {
   const lines: FeatureCollection<LineString, { color: string }> = {
     type: "FeatureCollection",
     features: trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) => {
@@ -454,7 +455,7 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
       type: "circle",
       source: TRAJECTORY_SOURCE,
       filter: ["==", "$type", "Point"],
-      paint: { "circle-radius": 3.5, "circle-color": "#000000" },
+      paint: { "circle-radius": 3.5, "circle-color": pointColor },
     });
     map.addLayer({
       id: TRAJECTORY_LINE_LAYER,
@@ -464,6 +465,7 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
       paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.9 },
     });
   }
+  map.setPaintProperty(TRAJECTORY_POINT_LAYER, "circle-color", pointColor);
 }
 
 function speedColor(speed: number) {
