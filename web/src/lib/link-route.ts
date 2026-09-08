@@ -22,12 +22,14 @@ export function parseLinkIds(content: string): string[] | null {
 export async function resolveOsmWays(linkIds: string[]): Promise<ResolvedOsmWay[]> {
   const requestedIds = [...new Set(linkIds)].join(",");
   const wayXml = await fetchXml(`${OSM_API_URL}/ways?ways=${requestedIds}`);
+  if (!wayXml) return [];
   const ways = parseWayReferences(wayXml);
   const nodeIds = [...new Set(ways.flatMap((way) => way.nodeIds))];
   const coordinates = new Map<string, Coordinate>();
 
   for (const ids of chunk(nodeIds, NODE_BATCH_SIZE)) {
-    parseNodes(await fetchXml(`${OSM_API_URL}/nodes?nodes=${ids.join(",")}`), coordinates);
+    const nodeXml = await fetchXml(`${OSM_API_URL}/nodes?nodes=${ids.join(",")}`);
+    if (nodeXml) parseNodes(nodeXml, coordinates);
   }
 
   return ways.flatMap((way) => {
@@ -37,9 +39,21 @@ export async function resolveOsmWays(linkIds: string[]): Promise<ResolvedOsmWay[
 }
 
 async function fetchXml(url: string) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`OpenStreetMap way lookup failed (${response.status})`);
-  return response.text();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) return response.text();
+      if (response.status < 500 && response.status !== 429) {
+        console.warn(`OpenStreetMap lookup skipped (${response.status})`);
+        return null;
+      }
+    } catch (error) {
+      console.warn("OpenStreetMap lookup request failed", error);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 500 * (attempt + 1)));
+  }
+  console.warn("OpenStreetMap lookup skipped after retries");
+  return null;
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
