@@ -361,6 +361,16 @@ button {
   white-space: nowrap;
 }
 
+.link-id-row {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  align-items: center;
+  width: 100%;
+  height: 28px;
+  font: 500 12px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+
 .trajectory-point-line {
   color: color-mix(in srgb, var(--panel-text) 45%, transparent);
   padding-left: 8px;

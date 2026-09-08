@@ -10,6 +10,7 @@ export type TrajectoryPoint = {
 };
 
 export type Trajectory = {
+  kind: "trajectory";
   id: string;
   name: string;
   points: TrajectoryPoint[];

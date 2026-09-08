@@ -9,7 +9,8 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, MouseEvent, MutableRefObject } from "react";
 import type { FeatureCollection, LineString, Point } from "geojson";
 
-import { readSessionState, writeSessionState } from "@/lib/session-state";
+import { parseLinkIds, resolveOsmWays } from "@/lib/link-route";
+import { readSessionState, writeSessionState, type LinkRoute, type RouteItem } from "@/lib/session-state";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
   parseTrajectory,
@@ -44,12 +45,12 @@ export function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markerRef = useRef<maplibregl.Marker | null>(null);
-  const trajectoriesRef = useRef<Trajectory[]>([]);
+  const routesRef = useRef<RouteItem[]>([]);
   const measurementEnabledRef = useRef(false);
   const measurementPointsRef = useRef<Coordinate[]>([]);
   const cameraRef = useRef({ center: [8.6821, 50.1109] as [number, number], zoom: 3.1 });
   const restoredSessionRef = useRef(false);
-  const [trajectories, setTrajectories] = useState<Trajectory[]>([]);
+  const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [measurementEnabled, setMeasurementEnabled] = useState(false);
   const [measurementPoints, setMeasurementPoints] = useState<Coordinate[]>([]);
   const [cursorPoint, setCursorPoint] = useState<Coordinate | null>(null);
@@ -62,16 +63,16 @@ export function MapView() {
   const [tollSettings, setTollSettings] = useState<Record<string, TollSettings>>({});
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
   const trajectoryPointColor = resolvedTheme === "dark" ? "#ffffff" : "#000000";
-  const receiptTrajectory = trajectories.find((trajectory) => trajectory.id === receiptTrajectoryId);
-  const hasSpeedData = trajectories.some((trajectory) => trajectory.points.some((point) => point.speed !== undefined));
+  const receiptRoute = routes.find((route) => route.id === receiptTrajectoryId);
+  const hasSpeedData = routes.some((route) => route.kind === "trajectory" && route.points.some((point) => point.speed !== undefined));
 
   useEffect(() => {
     const animationFrame = window.requestAnimationFrame(() => {
       if (!restoredSessionRef.current) {
         const stored = readSessionState();
         if (stored) {
-          trajectoriesRef.current = stored.trajectories;
-          setTrajectories(stored.trajectories);
+          routesRef.current = stored.routes;
+          setRoutes(stored.routes);
           if (stored.camera) cameraRef.current = stored.camera;
         }
         restoredSessionRef.current = true;
@@ -88,7 +89,7 @@ export function MapView() {
 
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       map.on("load", () => {
-        syncTrajectories(map, trajectoriesRef.current, trajectoryPointColor);
+        syncRoutes(map, routesRef.current, trajectoryPointColor);
         map.on("mouseenter", TRAJECTORY_POINT_LAYER, () => {
           map.getCanvas().style.cursor = "pointer";
         });
@@ -99,7 +100,7 @@ export function MapView() {
       map.on("moveend", () => {
         const center = map.getCenter();
         cameraRef.current = { center: [center.lng, center.lat], zoom: map.getZoom() };
-        persist(map, trajectoriesRef.current);
+        persist(map, routesRef.current);
       });
       map.on("click", (event) => {
         if (!measurementEnabledRef.current) {
@@ -137,12 +138,12 @@ export function MapView() {
   }, [styleUrl, trajectoryPointColor]);
 
   useEffect(() => {
-    trajectoriesRef.current = trajectories;
+    routesRef.current = routes;
     const map = mapRef.current;
     if (!map?.isStyleLoaded()) return;
-    syncTrajectories(map, trajectories, trajectoryPointColor);
-    persist(map, trajectories);
-  }, [trajectories, trajectoryPointColor]);
+    syncRoutes(map, routes, trajectoryPointColor);
+    persist(map, routes);
+  }, [routes, trajectoryPointColor]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -185,23 +186,25 @@ export function MapView() {
   }, [selectedPoint]);
 
   async function importFiles(files: File[]) {
-    const imported = (await Promise.all(files.map(async (file) => {
+    const imported = await Promise.all(files.map(async (file) => {
       const csv = await file.text();
-      return { name: file.name, csv, points: parseTrajectory(csv) };
-    }))).filter((file): file is { name: string; csv: string; points: TrajectoryPoint[] } => file.points !== null);
-
-    if (imported.length === 0) return;
-    setTrajectories((current) => {
-      const next = [...current, ...imported.map((file, index) => ({
-        id: crypto.randomUUID(),
-        name: file.name,
-        points: file.points,
-        visible: true,
-        color: trajectoryColor(current.length + index),
-        csv: file.csv,
-      }))];
+      const linkIds = parseLinkIds(csv);
+      if (linkIds) {
+        const ways = await resolveOsmWays(linkIds);
+        return { kind: "links" as const, id: crypto.randomUUID(), name: file.name, linkIds, ways, visible: true, csv };
+      }
+      const points = parseTrajectory(csv);
+      return points ? { kind: "trajectory" as const, id: crypto.randomUUID(), name: file.name, points, visible: true, color: "", csv } : null;
+    }));
+    const validImports = imported.filter((route): route is RouteItem => route !== null);
+    if (validImports.length === 0) return;
+    setRoutes((current) => {
+      let trajectoryIndex = current.filter((route) => route.kind === "trajectory").length;
+      const next = [...current, ...validImports.map((route) => route.kind === "trajectory"
+        ? { ...route, color: trajectoryColor(trajectoryIndex++) }
+        : route)];
       const map = mapRef.current;
-      if (map) fitTrajectories(map, next);
+      if (map) fitRoutes(map, next);
       return next;
     });
   }
@@ -306,55 +309,55 @@ export function MapView() {
           )}
         </div>
       )}
-      {trajectories.length > 0 && (
-        <aside className="trajectory-card" style={{ width: `${trajectoryPanelWidth(trajectories)}px` }}>
-          {trajectories.map((trajectory) => {
-            const expanded = expandedTrajectoryId === trajectory.id;
+      {routes.length > 0 && (
+        <aside className="trajectory-card" style={{ width: `${routePanelWidth(routes)}px` }}>
+          {routes.map((route) => {
+            const expanded = expandedTrajectoryId === route.id;
             return (
-              <div className="trajectory-item" key={trajectory.id}>
+              <div className="trajectory-item" key={route.id}>
                 <div className="trajectory-row">
                   <Button
                     aria-expanded={expanded}
-                    aria-label={`${expanded ? "Collapse" : "Expand"} ${trajectory.name}`}
+                    aria-label={`${expanded ? "Collapse" : "Expand"} ${route.name}`}
                     className="icon-button"
-                    onClick={() => setExpandedTrajectoryId((id) => id === trajectory.id ? null : trajectory.id)}
+                    onClick={() => setExpandedTrajectoryId((id) => id === route.id ? null : route.id)}
                     type="button"
                   >
                     {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                   </Button>
-                  <span className="trajectory-name">{trajectory.name}</span>
+                  <span className="trajectory-name">{route.name}</span>
                   <div className="trajectory-actions">
                     <Button
-                      aria-label={`Open toll receipt for ${trajectory.name}`}
-                      aria-pressed={receiptTrajectoryId === trajectory.id}
+                      aria-label={`Open toll receipt for ${route.name}`}
+                      aria-pressed={receiptTrajectoryId === route.id}
                       className="icon-button receipt-toggle"
-                      onClick={() => setReceiptTrajectoryId((id) => id === trajectory.id ? null : trajectory.id)}
+                      onClick={() => setReceiptTrajectoryId((id) => id === route.id ? null : route.id)}
                       type="button"
                     >
                       <ReceiptEuro size={16} />
                     </Button>
                     <Button
-                      aria-label={`Download ${trajectory.name}`}
+                      aria-label={`Download ${route.name}`}
                       className="icon-button"
-                      onClick={() => downloadTrajectory(trajectory)}
+                      onClick={() => downloadRoute(route)}
                       type="button"
                     >
                       <Download size={16} />
                     </Button>
                     <Button
-                      aria-label={trajectory.visible ? `Hide ${trajectory.name}` : `Show ${trajectory.name}`}
+                      aria-label={route.visible ? `Hide ${route.name}` : `Show ${route.name}`}
                       className="icon-button"
-                      onClick={() => setTrajectories((current) => current.map((item) =>
-                        item.id === trajectory.id ? { ...item, visible: !item.visible } : item,
+                      onClick={() => setRoutes((current) => current.map((item) =>
+                        item.id === route.id ? { ...item, visible: !item.visible } : item,
                       ))}
                       type="button"
                     >
-                      {trajectory.visible ? <Eye size={16} /> : <EyeOff size={16} />}
+                      {route.visible ? <Eye size={16} /> : <EyeOff size={16} />}
                     </Button>
                     <Button
-                      aria-label={`Delete ${trajectory.name}`}
+                      aria-label={`Delete ${route.name}`}
                       className="icon-button"
-                      onClick={() => setTrajectories((current) => current.filter((item) => item.id !== trajectory.id))}
+                      onClick={() => setRoutes((current) => current.filter((item) => item.id !== route.id))}
                       type="button"
                     >
                       <Trash2 size={16} />
@@ -362,7 +365,9 @@ export function MapView() {
                   </div>
                 </div>
                 <div className={`trajectory-points ${expanded ? "is-expanded" : ""}`}>
-                  <TrajectoryPointList points={trajectory.points} onSelect={selectTrajectoryPoint} />
+                  {route.kind === "trajectory"
+                    ? <TrajectoryPointList points={route.points} onSelect={selectTrajectoryPoint} />
+                    : <LinkIdList linkIds={route.linkIds} />}
                 </div>
               </div>
             );
@@ -370,19 +375,19 @@ export function MapView() {
         </aside>
       )}
       <AnimatePresence>
-        {receiptTrajectory && (
+        {receiptRoute && (
           <motion.div
             animate={{ opacity: 1, scale: 1, y: 0 }}
             className="floating-toll-card"
             exit={{ opacity: 0, scale: 0.96, y: -6 }}
             initial={{ opacity: 0, scale: 0.96, y: -6 }}
-            style={{ left: `${trajectoryPanelWidth(trajectories) + 24}px` }}
+            style={{ left: `${routePanelWidth(routes) + 24}px` }}
             transition={{ duration: 0.18, ease: "easeOut" }}
           >
             <TollCard
-              settings={tollSettings[receiptTrajectory.id] ?? { axles: 2, emissionClass: 0 }}
-              trajectory={receiptTrajectory}
-              onChange={(settings) => setTollSettings((current) => ({ ...current, [receiptTrajectory.id]: settings }))}
+              settings={tollSettings[receiptRoute.id] ?? { axles: 2, emissionClass: 0 }}
+              route={receiptRoute}
+              onChange={(settings) => setTollSettings((current) => ({ ...current, [receiptRoute.id]: settings }))}
             />
           </motion.div>
         )}
@@ -401,15 +406,15 @@ export function MapView() {
   );
 }
 
-function persist(map: maplibregl.Map, trajectories: Trajectory[]) {
+function persist(map: maplibregl.Map, routes: RouteItem[]) {
   const center = map.getCenter();
-  writeSessionState({ trajectories, camera: { center: [center.lng, center.lat], zoom: map.getZoom() } });
+  writeSessionState({ routes, camera: { center: [center.lng, center.lat], zoom: map.getZoom() } });
 }
 
-function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[], pointColor: string) {
+function syncRoutes(map: maplibregl.Map, routes: RouteItem[], pointColor: string) {
   const lines: FeatureCollection<LineString, { color: string }> = {
     type: "FeatureCollection",
-    features: trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) => {
+    features: routes.filter((route): route is Trajectory => route.visible && route.kind === "trajectory").flatMap((trajectory) => {
       if (!trajectory.points.some((point) => point.speed !== undefined)) {
         return [{
           type: "Feature" as const,
@@ -424,6 +429,16 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[], point
       }));
     }),
   };
+  const links: FeatureCollection<LineString, { color: string }> = {
+    type: "FeatureCollection",
+    features: routes.filter((route): route is LinkRoute => route.visible && route.kind === "links").flatMap((route) =>
+      route.ways.map((way) => ({
+        type: "Feature" as const,
+        properties: { color: "#facc15" },
+        geometry: { type: "LineString" as const, coordinates: way.coordinates },
+      })),
+    ),
+  };
   const points: FeatureCollection<Point, {
     timestamp: string;
     latitude: string;
@@ -432,7 +447,7 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[], point
     direction?: string;
   }> = {
     type: "FeatureCollection",
-    features: trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) =>
+    features: routes.filter((route): route is Trajectory => route.visible && route.kind === "trajectory").flatMap((trajectory) =>
       trajectory.points.map((point) => ({
         type: "Feature" as const,
         properties: {
@@ -447,9 +462,9 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[], point
     ),
   };
   const source = map.getSource(TRAJECTORY_SOURCE) as maplibregl.GeoJSONSource | undefined;
-  if (source) source.setData({ type: "FeatureCollection", features: [...lines.features, ...points.features] });
+  if (source) source.setData({ type: "FeatureCollection", features: [...lines.features, ...links.features, ...points.features] });
   else {
-    map.addSource(TRAJECTORY_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [...lines.features, ...points.features] } });
+    map.addSource(TRAJECTORY_SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [...lines.features, ...links.features, ...points.features] } });
     map.addLayer({
       id: TRAJECTORY_POINT_LAYER,
       type: "circle",
@@ -463,6 +478,14 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[], point
       source: TRAJECTORY_SOURCE,
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.9 },
+    });
+    map.addLayer({
+      id: "link-routes",
+      type: "line",
+      source: TRAJECTORY_SOURCE,
+      filter: ["all", ["==", "$type", "LineString"], ["==", ["get", "color"], "#facc15"]],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#facc15", "line-width": 5, "line-opacity": 0.95 },
     });
   }
   map.setPaintProperty(TRAJECTORY_POINT_LAYER, "circle-color", pointColor);
@@ -519,9 +542,10 @@ function syncMeasurement(
     .addTo(map);
 }
 
-function fitTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
-  const coordinates = trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) =>
-    trajectory.points.map((point) => point.coordinate),
+function fitRoutes(map: maplibregl.Map, routes: RouteItem[]) {
+  const coordinates = routes.filter((route) => route.visible).flatMap((route) => route.kind === "trajectory"
+    ? route.points.map((point) => point.coordinate)
+    : route.ways.flatMap((way) => way.coordinates),
   );
   if (coordinates.length === 0) return;
   const bounds = coordinates.reduce(
@@ -548,11 +572,14 @@ function formatDistance(meters: number) {
   return meters >= 1_000 ? `${(meters / 1_000).toFixed(2)} km` : `${Math.round(meters)} m`;
 }
 
-function trajectoryDistanceKilometers(trajectory: Trajectory) {
-  return trajectory.points.slice(1).reduce(
-    (total, point, index) => total + haversine(trajectory.points[index].coordinate, point.coordinate),
-    0,
-  ) / 1_000;
+function routeDistanceKilometers(route: RouteItem) {
+  if (route.kind === "trajectory") {
+    return route.points.slice(1).reduce(
+      (total, point, index) => total + haversine(route.points[index].coordinate, point.coordinate),
+      0,
+    ) / 1_000;
+  }
+  return route.ways.reduce((total, way) => total + measureDistance(way.coordinates), 0) / 1_000;
 }
 
 function calculateToll(distanceKilometers: number, settings: TollSettings) {
@@ -562,29 +589,29 @@ function calculateToll(distanceKilometers: number, settings: TollSettings) {
   return { distanceCharge, axleCharge, emissionSurcharge, total: distanceCharge + axleCharge + emissionSurcharge };
 }
 
-function downloadTrajectory(trajectory: Trajectory) {
-  const url = URL.createObjectURL(new Blob([trajectory.csv], { type: "text/csv;charset=utf-8" }));
+function downloadRoute(route: RouteItem) {
+  const url = URL.createObjectURL(new Blob([route.csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = trajectory.name;
+  link.download = route.name;
   link.click();
   URL.revokeObjectURL(url);
 }
 
 function TollCard({
-  trajectory,
+  route,
   settings,
   onChange,
   className,
   style,
 }: {
-  trajectory: Trajectory;
+  route: RouteItem;
   settings: TollSettings;
   onChange: (settings: TollSettings) => void;
   className?: string;
   style?: CSSProperties;
 }) {
-  const kilometers = trajectoryDistanceKilometers(trajectory);
+  const kilometers = routeDistanceKilometers(route);
   const toll = calculateToll(kilometers, settings);
   const formatEuro = (value: number) => new Intl.NumberFormat(undefined, { style: "currency", currency: "EUR" }).format(value);
 
@@ -635,7 +662,7 @@ function TollCard({
         <AnimatedAmount value={formatEuro(toll.emissionSurcharge)} />
       </div>
       <div className="toll-total">
-        <Button aria-label={`Download toll receipt for ${trajectory.name}`} className="receipt-button" onClick={() => void downloadReceipt(trajectory, settings, kilometers, toll)} type="button">
+        <Button aria-label={`Download toll receipt for ${route.name}`} className="receipt-button" onClick={() => void downloadReceipt(route, settings, kilometers, toll)} type="button">
           <Download size={15} />
         </Button>
         <AnimatedAmount value={formatEuro(toll.total)} />
@@ -662,7 +689,7 @@ function AnimatedAmount({ value }: { value: string }) {
   );
 }
 
-async function downloadReceipt(trajectory: Trajectory, settings: TollSettings, kilometers: number, toll: ReturnType<typeof calculateToll>) {
+async function downloadReceipt(route: RouteItem, settings: TollSettings, kilometers: number, toll: ReturnType<typeof calculateToll>) {
   const { jsPDF } = await import("jspdf");
   const receipt = new jsPDF({ unit: "mm", format: "a4" });
   const euro = (value: number) => `EUR ${value.toFixed(2)}`;
@@ -698,7 +725,7 @@ async function downloadReceipt(trajectory: Trajectory, settings: TollSettings, k
   receipt.setFontSize(13);
   receipt.setTextColor(0);
   receipt.text(euro(toll.total), right, 108, { align: "right" });
-  receipt.save(`${trajectory.name.replace(/\.csv$/i, "")}-toll-receipt.pdf`);
+  receipt.save(`${route.name.replace(/\.[^.]+$/i, "")}-toll-receipt.pdf`);
 }
 
 function CopyValue({ label }: { label: string }) {
@@ -754,6 +781,41 @@ function TrajectoryPointList({
   );
 }
 
+function LinkIdList({ linkIds }: { linkIds: string[] }) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const firstVisibleIndex = Math.max(0, Math.floor(scrollTop / POINT_ROW_HEIGHT) - 2);
+  const visibleIds = linkIds.slice(firstVisibleIndex, firstVisibleIndex + VISIBLE_POINT_ROWS + 4);
+
+  return (
+    <div
+      className="trajectory-points-scroll"
+      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      style={{ height: POINT_ROW_HEIGHT * VISIBLE_POINT_ROWS }}
+    >
+      <div className="trajectory-points-spacer" style={{ height: linkIds.length * POINT_ROW_HEIGHT }}>
+        <div className="trajectory-points-window" style={{ transform: `translateY(${firstVisibleIndex * POINT_ROW_HEIGHT}px)` }}>
+          {visibleIds.map((linkId, offset) => {
+            const index = firstVisibleIndex + offset;
+            return (
+              <div className="link-id-row" key={`${linkId}-${index}`}>
+                <span className="trajectory-point-line">{index + 2}</span>
+                <Button
+                  aria-label={`Copy OpenStreetMap link ${linkId}`}
+                  className="trajectory-point-cell"
+                  onClick={() => void navigator.clipboard.writeText(linkId)}
+                  type="button"
+                >
+                  {linkId}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CopyPointCell({
   point,
   value,
@@ -778,15 +840,17 @@ function CopyPointCell({
   );
 }
 
-function trajectoryPanelWidth(trajectories: Trajectory[]) {
+function routePanelWidth(routes: RouteItem[]) {
   const pointWidth = Math.max(
-    ...trajectories.flatMap((trajectory) => trajectory.points.map((point) =>
-      40 + 8 + point.timestamp.length * 7.25 + 8 + point.latitude.length * 7.25 + 8 + point.longitude.length * 7.25,
-    )),
+    0,
+    ...routes.flatMap((route) => route.kind === "trajectory"
+      ? route.points.map((point) => 40 + 8 + point.timestamp.length * 7.25 + 8 + point.latitude.length * 7.25 + 8 + point.longitude.length * 7.25)
+      : route.linkIds.map((linkId) => 40 + 8 + linkId.length * 7.25),
+    ),
   );
   const fileWidth = Math.max(
-    ...trajectories.map((trajectory) =>
-      12 + 5 * 28 + 4 * 2 + trajectory.name.length * 9,
+    ...routes.map((route) =>
+      12 + 5 * 28 + 4 * 2 + route.name.length * 9,
     ),
   );
   return Math.min(window.innerWidth - 24, Math.ceil(Math.max(pointWidth, fileWidth)));
