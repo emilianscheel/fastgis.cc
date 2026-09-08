@@ -7,7 +7,7 @@
   --panel-hover: rgb(17 24 39 / 8%);
   --panel-text: #1f2937;
   --tool-glow: rgb(82 82 91 / 20%);
-  --tool-hover: rgb(17 24 39 / 4%);
+  --tool-hover: #f1f1f0;
 }
 
 .dark {
@@ -16,7 +16,7 @@
   --panel-hover: rgb(255 255 255 / 10%);
   --panel-text: #f4f4f5;
   --tool-glow: rgb(161 161 170 / 20%);
-  --tool-hover: rgb(255 255 255 / 5%);
+  --tool-hover: #f1f1f0;
 }
 
 * {
@@ -422,9 +422,9 @@ button {
   border: 0;
   border-radius: 4px;
   background: var(--panel);
-  outline: 1px solid rgb(113 113 122 / 25%);
+  outline: 1px solid #e0e2e3;
   outline-offset: 0;
-  box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+  box-shadow: 0 0 0 3px var(--tool-glow), 0 2px 8px rgb(0 0 0 / 12%);
   backdrop-filter: blur(10px);
 }
 
@@ -435,7 +435,6 @@ button {
 
 .map-tool-button[aria-pressed="true"] {
   background: var(--tool-hover);
-  box-shadow: 0 0 0 4px var(--tool-glow), 0 2px 8px rgb(0 0 0 / 12%);
 }
 
 .map-tool-button:hover {
@@ -444,9 +443,8 @@ button {
 
 .map-tool-button:focus-visible {
   background: var(--tool-hover);
-  outline: 2px solid #71717a;
+  outline: 1px solid #e0e2e3;
   outline-offset: 0;
-  box-shadow: 0 0 0 4px var(--tool-glow), 0 2px 8px rgb(0 0 0 / 12%);
 }
 
 .area-zoom-button {
