@@ -54,7 +54,7 @@ button {
 .speed-legend {
   position: absolute;
   top: 12px;
-  right: 72px;
+  right: 52px;
   z-index: 1;
   display: grid;
   grid-template-columns: auto 104px auto;
