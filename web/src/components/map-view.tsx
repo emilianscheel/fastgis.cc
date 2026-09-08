@@ -12,7 +12,7 @@ import type { FeatureCollection, LineString, Point } from "geojson";
 import { readSessionState, writeSessionState } from "@/lib/session-state";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
-  parseTrajectoryCsv,
+  parseTrajectory,
   trajectoryColor,
   type Coordinate,
   type Trajectory,
@@ -26,6 +26,7 @@ const TRAJECTORY_SOURCE = "trajectories";
 const TRAJECTORY_LINE_LAYER = "trajectory-lines";
 const TRAJECTORY_POINT_LAYER = "trajectory-points";
 const MEASUREMENT_SOURCE = "measurement";
+const MAX_LEGEND_SPEED = 130;
 const EMISSION_CLASSES = [
   { label: "0", multiplier: 0 },
   { label: "I", multiplier: 1 },
@@ -61,6 +62,7 @@ export function MapView() {
   const [tollSettings, setTollSettings] = useState<Record<string, TollSettings>>({});
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
   const receiptTrajectory = trajectories.find((trajectory) => trajectory.id === receiptTrajectoryId);
+  const hasSpeedData = trajectories.some((trajectory) => trajectory.points.some((point) => point.speed !== undefined));
 
   useEffect(() => {
     const animationFrame = window.requestAnimationFrame(() => {
@@ -110,6 +112,8 @@ export function MapView() {
             latitude: properties.latitude,
             longitude: properties.longitude,
             coordinate: [Number(properties.longitude), Number(properties.latitude)],
+            ...(properties.speed === undefined ? {} : { speed: Number(properties.speed) }),
+            ...(properties.direction === undefined ? {} : { direction: Number(properties.direction) }),
           });
           return;
         }
@@ -182,7 +186,7 @@ export function MapView() {
   async function importFiles(files: File[]) {
     const imported = (await Promise.all(files.map(async (file) => {
       const csv = await file.text();
-      return { name: file.name, csv, points: parseTrajectoryCsv(csv) };
+      return { name: file.name, csv, points: parseTrajectory(csv) };
     }))).filter((file): file is { name: string; csv: string; points: TrajectoryPoint[] } => file.points !== null);
 
     if (imported.length === 0) return;
@@ -376,8 +380,11 @@ export function MapView() {
           <CopyValue label={`${selectedPoint.latitude}, ${selectedPoint.longitude}`} />
           <CopyValue label={selectedPoint.timestamp} />
           <CopyValue label={new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(selectedPoint.timestamp))} />
+          {selectedPoint.speed !== undefined && <CopyValue label={`${selectedPoint.speed} km/h`} />}
+          {selectedPoint.direction !== undefined && <CopyValue label={`${selectedPoint.direction}°`} />}
         </aside>
       )}
+      {hasSpeedData && <SpeedLegend />}
     </main>
   );
 }
@@ -390,18 +397,39 @@ function persist(map: maplibregl.Map, trajectories: Trajectory[]) {
 function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
   const lines: FeatureCollection<LineString, { color: string }> = {
     type: "FeatureCollection",
-    features: trajectories.filter((trajectory) => trajectory.visible).map((trajectory) => ({
-      type: "Feature",
-      properties: { color: trajectory.color },
-      geometry: { type: "LineString", coordinates: trajectory.points.map((point) => point.coordinate) },
-    })),
+    features: trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) => {
+      if (!trajectory.points.some((point) => point.speed !== undefined)) {
+        return [{
+          type: "Feature" as const,
+          properties: { color: trajectory.color },
+          geometry: { type: "LineString" as const, coordinates: trajectory.points.map((point) => point.coordinate) },
+        }];
+      }
+      return trajectory.points.slice(1).map((point, index) => ({
+        type: "Feature" as const,
+        properties: { color: speedColor(point.speed ?? trajectory.points[index].speed ?? 0) },
+        geometry: { type: "LineString" as const, coordinates: [trajectory.points[index].coordinate, point.coordinate] },
+      }));
+    }),
   };
-  const points: FeatureCollection<Point, { timestamp: string; latitude: string; longitude: string }> = {
+  const points: FeatureCollection<Point, {
+    timestamp: string;
+    latitude: string;
+    longitude: string;
+    speed?: string;
+    direction?: string;
+  }> = {
     type: "FeatureCollection",
     features: trajectories.filter((trajectory) => trajectory.visible).flatMap((trajectory) =>
       trajectory.points.map((point) => ({
         type: "Feature" as const,
-        properties: { timestamp: point.timestamp, latitude: point.latitude, longitude: point.longitude },
+        properties: {
+          timestamp: point.timestamp,
+          latitude: point.latitude,
+          longitude: point.longitude,
+          ...(point.speed === undefined ? {} : { speed: String(point.speed) }),
+          ...(point.direction === undefined ? {} : { direction: String(point.direction) }),
+        },
         geometry: { type: "Point" as const, coordinates: point.coordinate },
       })),
     ),
@@ -425,6 +453,22 @@ function syncTrajectories(map: maplibregl.Map, trajectories: Trajectory[]) {
       paint: { "circle-radius": 3.5, "circle-color": "#000000" },
     });
   }
+
+}
+
+function speedColor(speed: number) {
+  const normalized = Math.max(0, Math.min(speed, MAX_LEGEND_SPEED)) / MAX_LEGEND_SPEED;
+  return `hsl(${240 - normalized * 240} 85% 48%)`;
+}
+
+function SpeedLegend() {
+  return (
+    <aside className="speed-legend" aria-label="Speed in kilometers per hour">
+      <span>{MAX_LEGEND_SPEED} km/h</span>
+      <div className="speed-gradient" />
+      <span>0 km/h</span>
+    </aside>
+  );
 }
 
 function syncMeasurement(

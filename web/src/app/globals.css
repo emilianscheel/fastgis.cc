@@ -51,6 +51,30 @@ button {
   background-color: var(--panel-hover);
 }
 
+.speed-legend {
+  position: absolute;
+  top: 12px;
+  right: 72px;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto 104px auto;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--panel-text);
+  font: 500 11px/1 ui-sans-serif, system-ui, sans-serif;
+  backdrop-filter: blur(10px);
+}
+
+.speed-gradient {
+  height: 7px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, hsl(240 85% 48%), hsl(180 85% 48%), hsl(120 85% 44%), hsl(60 85% 48%), hsl(0 85% 48%));
+}
+
 .measurement-label {
   border: 1px solid var(--panel-border);
   border-radius: 6px;
