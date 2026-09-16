@@ -48,6 +48,11 @@ export function parseTrajectory(content: string): TrajectoryPoint[] | null {
 
 export const parseTrajectoryCsv = parseTrajectory;
 
+export function serializeTrajectoryCsv(points: TrajectoryPoint[]) {
+  const rows = points.map((point) => `${point.timestamp},${point.latitude},${point.longitude}`);
+  return `timestamp,latitude,longitude\n${rows.join("\n")}\n`;
+}
+
 function detectSeparator(lines: string[]) {
   return [",", ";", "\t", "|"].reduce(
     (best, separator) => lines.reduce((count, line) => count + line.split(separator).length - 1, 0) > best.count

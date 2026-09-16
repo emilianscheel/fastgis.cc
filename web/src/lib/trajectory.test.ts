@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { parseTrajectory } from "./trajectory";
+import { parseTrajectory, serializeTrajectoryCsv } from "./trajectory";
 
 test("parses timestamp, latitude, and longitude trajectory rows", () => {
   expect(
@@ -63,4 +63,14 @@ test("infers adjacent latitude and longitude columns without a header", () => {
       coordinate: [13.168499, 52.375396],
     },
   ]);
+});
+
+test("serializes parsed points for GNSS noise inference", () => {
+  const points = parseTrajectory(
+    "TIME;LAT;LON;DIRECTION;SPEED\n2026-09-02T08:03:53;52.375409;13.168512;999.9;0\n2026-09-02T08:04:05;52.375396;13.168499;210;1.86",
+  );
+
+  expect(points && serializeTrajectoryCsv(points)).toBe(
+    "timestamp,latitude,longitude\n2026-09-02T08:03:53,52.375409,13.168512\n2026-09-02T08:04:05,52.375396,13.168499\n",
+  );
 });

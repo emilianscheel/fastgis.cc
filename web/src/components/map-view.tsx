@@ -2,7 +2,7 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { Check, ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, ReceiptEuro, Ruler, ScanSearch, Trash2 } from "lucide-react";
+import { AudioWaveform, Check, ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, ReceiptEuro, Ruler, ScanSearch, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { AnimatePresence, motion } from "motion/react";
 import { createRoot } from "react-dom/client";
@@ -10,11 +10,13 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, MouseEvent, MutableRefObject } from "react";
 import type { FeatureCollection, LineString, Point } from "geojson";
 
+import { addGnssNoise } from "@/gnss-noise-model/inference.js";
 import { parseLinkIds, resolveOsmWays } from "@/lib/link-route";
 import { readSessionState, writeSessionState, type LinkRoute, type RouteItem } from "@/lib/session-state";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
   parseTrajectory,
+  serializeTrajectoryCsv,
   trajectoryColor,
   type Coordinate,
   type Trajectory,
@@ -62,6 +64,7 @@ export function MapView() {
   const [pointCardPosition, setPointCardPosition] = useState({ x: 0, y: 0 });
   const [expandedTrajectoryId, setExpandedTrajectoryId] = useState<string | null>(null);
   const [receiptTrajectoryId, setReceiptTrajectoryId] = useState<string | null>(null);
+  const [noisyTrajectoryIds, setNoisyTrajectoryIds] = useState<Set<string>>(() => new Set());
   const [areaZoomEnabled, setAreaZoomEnabled] = useState(false);
   const [zoomSelection, setZoomSelection] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const [tollSettings, setTollSettings] = useState<Record<string, TollSettings>>({});
@@ -242,6 +245,39 @@ export function MapView() {
     });
   }
 
+  async function addNoisyTrajectory(route: Trajectory) {
+    setNoisyTrajectoryIds((current) => new Set(current).add(route.id));
+    try {
+      const csv = await addGnssNoise(serializeTrajectoryCsv(route.points));
+      const points = parseTrajectory(csv);
+      if (!points) throw new Error("The generated trajectory is invalid");
+
+      setRoutes((current) => {
+        const next = [...current, {
+          kind: "trajectory" as const,
+          id: crypto.randomUUID(),
+          name: noisyTrajectoryName(route.name),
+          points,
+          visible: true,
+          color: trajectoryColor(current.filter((item) => item.kind === "trajectory").length),
+          csv,
+        }];
+        const map = mapRef.current;
+        if (map) fitRoutes(map, next);
+        return next;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      window.alert(`Could not add GNSS noise: ${message}`);
+    } finally {
+      setNoisyTrajectoryIds((current) => {
+        const next = new Set(current);
+        next.delete(route.id);
+        return next;
+      });
+    }
+  }
+
   function selectTrajectoryPoint(point: TrajectoryPoint) {
     const map = mapRef.current;
     setSelectedPoint(point);
@@ -380,6 +416,17 @@ export function MapView() {
                     >
                       <ReceiptEuro size={16} />
                     </Button>
+                    {route.kind === "trajectory" && (
+                      <Button
+                        aria-label={`Add GNSS noise to ${route.name}`}
+                        className="icon-button"
+                        disabled={noisyTrajectoryIds.has(route.id)}
+                        onClick={() => void addNoisyTrajectory(route)}
+                        type="button"
+                      >
+                        <AudioWaveform size={16} />
+                      </Button>
+                    )}
                     <Button
                       aria-label={`Download ${route.name}`}
                       className="icon-button"
@@ -691,6 +738,10 @@ function downloadRoute(route: RouteItem) {
   link.download = route.name;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function noisyTrajectoryName(name: string) {
+  return `${name.replace(/\.csv$/i, "")}-noisy.csv`;
 }
 
 function TollCard({
