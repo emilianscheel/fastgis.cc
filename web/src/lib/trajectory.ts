@@ -16,10 +16,22 @@ export type Trajectory = {
   points: TrajectoryPoint[];
   visible: boolean;
   color: string;
+  colorMode: "solid" | "speed";
   csv: string;
 };
 
-const TRAJECTORY_COLORS = ["#2563eb", "#db2777", "#16a34a", "#ea580c", "#7c3aed", "#0891b2"];
+const TRAJECTORY_COLORS = [
+  "#2563eb",
+  "#db2777",
+  "#16a34a",
+  "#ea580c",
+  "#7c3aed",
+  "#0891b2",
+  "#dc2626",
+  "#ca8a04",
+  "#4f46e5",
+  "#65a30d",
+];
 
 const COLUMN_ALIASES = {
   timestamp: ["timestamp", "time", "datetime", "date", "zeit", "datum"],
@@ -125,4 +137,8 @@ function isLongitude(value: string) {
 
 export function trajectoryColor(index: number) {
   return TRAJECTORY_COLORS[index % TRAJECTORY_COLORS.length];
+}
+
+export function nextTrajectoryColor(color: string) {
+  return trajectoryColor(TRAJECTORY_COLORS.indexOf(color) + 1);
 }

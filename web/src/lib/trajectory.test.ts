@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { parseTrajectory, serializeTrajectoryCsv } from "./trajectory";
+import { nextTrajectoryColor, parseTrajectory, serializeTrajectoryCsv, trajectoryColor } from "./trajectory";
 
 test("parses timestamp, latitude, and longitude trajectory rows", () => {
   expect(
@@ -73,4 +73,12 @@ test("serializes parsed points for GNSS noise inference", () => {
   expect(points && serializeTrajectoryCsv(points)).toBe(
     "timestamp,latitude,longitude\n2026-09-02T08:03:53,52.375409,13.168512\n2026-09-02T08:04:05,52.375396,13.168499\n",
   );
+});
+
+test("rotates through ten trajectory colors", () => {
+  const colors = Array.from({ length: 10 }, (_, index) => trajectoryColor(index));
+
+  expect(new Set(colors).size).toBe(10);
+  expect(trajectoryColor(10)).toBe(colors[0]);
+  expect(nextTrajectoryColor(colors[9])).toBe(colors[0]);
 });

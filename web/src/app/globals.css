@@ -132,6 +132,29 @@ button {
   white-space: nowrap;
 }
 
+.trajectory-color-button {
+  display: grid;
+  width: 20px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.trajectory-color-dot {
+  width: 11px;
+  height: 11px;
+  border: 1px solid rgb(255 255 255 / 70%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 22%);
+}
+
+.trajectory-color-dot.is-speed {
+  background: linear-gradient(90deg, hsl(240 85% 48%), hsl(120 85% 44%), hsl(0 85% 48%));
+}
+
 .trajectory-actions {
   display: flex;
   flex: 0 0 auto;
@@ -473,8 +496,14 @@ button {
   background: var(--panel-hover);
 }
 
-.receipt-toggle[aria-pressed="true"] {
+.receipt-toggle[aria-pressed="true"],
+.speed-toggle[aria-pressed="true"] {
   background: var(--panel-hover);
+}
+
+.icon-button:disabled {
+  cursor: default;
+  opacity: 0.35;
 }
 
 .map-tool-button {

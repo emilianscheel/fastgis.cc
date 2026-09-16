@@ -28,7 +28,10 @@ export function readSessionState(): SessionState | null {
     const value = window.sessionStorage.getItem(KEY);
     if (!value) return null;
     const state = JSON.parse(value) as SessionState & { trajectories?: Trajectory[] };
-    const routes = state.routes ?? state.trajectories?.map((trajectory) => ({ ...trajectory, kind: "trajectory" as const }));
+    const storedRoutes = state.routes ?? state.trajectories?.map((trajectory) => ({ ...trajectory, kind: "trajectory" as const }));
+    const routes = storedRoutes?.map((route) => route.kind === "trajectory"
+      ? { ...route, colorMode: route.colorMode ?? "solid" as const }
+      : route);
     return routes ? { ...state, routes } : null;
   } catch {
     return null;

@@ -2,7 +2,7 @@
 
 import * as maplibregl from "maplibre-gl";
 import { Button } from "@base-ui/react/button";
-import { AudioWaveform, Check, ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Minus, Plus, ReceiptEuro, Ruler, ScanSearch, Trash2 } from "lucide-react";
+import { AudioWaveform, Check, ChevronDown, ChevronRight, Copy, Download, Eye, EyeOff, Gauge, Minus, PaintRoller, Plus, ReceiptEuro, Ruler, ScanSearch, Trash2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { AnimatePresence, motion } from "motion/react";
 import { createRoot } from "react-dom/client";
@@ -15,6 +15,7 @@ import { parseLinkIds, resolveOsmWays } from "@/lib/link-route";
 import { readSessionState, writeSessionState, type LinkRoute, type RouteItem } from "@/lib/session-state";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
+  nextTrajectoryColor,
   parseTrajectory,
   serializeTrajectoryCsv,
   trajectoryColor,
@@ -71,7 +72,12 @@ export function MapView() {
   const styleUrl = resolvedTheme === "dark" ? DARK_STYLE_URL : LIGHT_STYLE_URL;
   const trajectoryPointColor = resolvedTheme === "dark" ? "#ffffff" : "#000000";
   const receiptRoute = routes.find((route) => route.id === receiptTrajectoryId);
-  const hasSpeedData = routes.some((route) => route.kind === "trajectory" && route.points.some((point) => point.speed !== undefined));
+  const hasSpeedData = routes.some((route) =>
+    route.kind === "trajectory"
+    && route.visible
+    && route.colorMode === "speed"
+    && route.points.some((point) => point.speed !== undefined),
+  );
 
   useEffect(() => {
     const animationFrame = window.requestAnimationFrame(() => {
@@ -222,7 +228,7 @@ export function MapView() {
   }, [selectedPoint]);
 
   async function importFiles(files: File[]) {
-    const imported = await Promise.all(files.map(async (file) => {
+    const imported = await Promise.all(files.map(async (file): Promise<RouteItem | null> => {
       const csv = await file.text();
       const linkIds = parseLinkIds(csv);
       if (linkIds) {
@@ -230,7 +236,16 @@ export function MapView() {
         return { kind: "links" as const, id: crypto.randomUUID(), name: file.name, linkIds, ways, visible: true, csv };
       }
       const points = parseTrajectory(csv);
-      return points ? { kind: "trajectory" as const, id: crypto.randomUUID(), name: file.name, points, visible: true, color: "", csv } : null;
+      return points ? {
+        kind: "trajectory" as const,
+        id: crypto.randomUUID(),
+        name: file.name,
+        points,
+        visible: true,
+        color: "",
+        colorMode: "solid" as const,
+        csv,
+      } : null;
     }));
     const validImports = imported.filter((route): route is RouteItem => route !== null);
     if (validImports.length === 0) return;
@@ -260,6 +275,7 @@ export function MapView() {
           points,
           visible: true,
           color: trajectoryColor(current.filter((item) => item.kind === "trajectory").length),
+          colorMode: "solid" as const,
           csv,
         }];
         const map = mapRef.current;
@@ -284,6 +300,18 @@ export function MapView() {
     if (map) {
       map.easeTo({ center: point.coordinate, zoom: Math.max(map.getZoom(), 16), duration: 650, essential: true });
     }
+  }
+
+  function rotateTrajectoryColor(id: string) {
+    setRoutes((current) => current.map((route) => route.kind === "trajectory" && route.id === id
+      ? { ...route, color: nextTrajectoryColor(route.color), colorMode: "solid" }
+      : route));
+  }
+
+  function enableSpeedColorMode(id: string) {
+    setRoutes((current) => current.map((route) => route.kind === "trajectory" && route.id === id
+      ? { ...route, colorMode: "speed" }
+      : route));
   }
 
   function selectLinkRouteWay(route: LinkRoute, linkId: string) {
@@ -405,6 +433,19 @@ export function MapView() {
                   >
                     {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                   </Button>
+                  {route.kind === "trajectory" && (
+                    <Button
+                      aria-label={`Change color of ${route.name}`}
+                      className="trajectory-color-button"
+                      onClick={() => rotateTrajectoryColor(route.id)}
+                      type="button"
+                    >
+                      <span
+                        className={`trajectory-color-dot ${route.colorMode === "speed" ? "is-speed" : ""}`}
+                        style={route.colorMode === "solid" ? { background: route.color } : undefined}
+                      />
+                    </Button>
+                  )}
                   <span className="trajectory-name">{route.name}</span>
                   <div className="trajectory-actions">
                     <Button
@@ -417,15 +458,35 @@ export function MapView() {
                       <ReceiptEuro size={16} />
                     </Button>
                     {route.kind === "trajectory" && (
-                      <Button
-                        aria-label={`Add GNSS noise to ${route.name}`}
-                        className="icon-button"
-                        disabled={noisyTrajectoryIds.has(route.id)}
-                        onClick={() => void addNoisyTrajectory(route)}
-                        type="button"
-                      >
-                        <AudioWaveform size={16} />
-                      </Button>
+                      <>
+                        <Button
+                          aria-label={`Add GNSS noise to ${route.name}`}
+                          className="icon-button"
+                          disabled={noisyTrajectoryIds.has(route.id)}
+                          onClick={() => void addNoisyTrajectory(route)}
+                          type="button"
+                        >
+                          <AudioWaveform size={16} />
+                        </Button>
+                        <Button
+                          aria-label={`Change color of ${route.name}`}
+                          className="icon-button"
+                          onClick={() => rotateTrajectoryColor(route.id)}
+                          type="button"
+                        >
+                          <PaintRoller size={16} />
+                        </Button>
+                        <Button
+                          aria-label={`Color ${route.name} by speed`}
+                          aria-pressed={route.colorMode === "speed"}
+                          className="icon-button speed-toggle"
+                          disabled={!route.points.some((point) => point.speed !== undefined)}
+                          onClick={() => enableSpeedColorMode(route.id)}
+                          type="button"
+                        >
+                          <Gauge size={16} />
+                        </Button>
+                      </>
                     )}
                     <Button
                       aria-label={`Download ${route.name}`}
@@ -515,7 +576,7 @@ function syncRoutes(map: maplibregl.Map, routes: RouteItem[], pointColor: string
   const lines: FeatureCollection<LineString, { color: string }> = {
     type: "FeatureCollection",
     features: routes.filter((route): route is Trajectory => route.visible && route.kind === "trajectory").flatMap((trajectory) => {
-      if (!trajectory.points.some((point) => point.speed !== undefined)) {
+      if (trajectory.colorMode !== "speed" || !trajectory.points.some((point) => point.speed !== undefined)) {
         return [{
           type: "Feature" as const,
           properties: { color: trajectory.color },
@@ -1020,7 +1081,7 @@ function routePanelWidth(routes: RouteItem[]) {
   );
   const fileWidth = Math.max(
     ...routes.map((route) =>
-      12 + 5 * 28 + 4 * 2 + route.name.length * 9,
+      (route.kind === "trajectory" ? 274 : 160) + route.name.length * 9,
     ),
   );
   return Math.min(window.innerWidth - 24, Math.ceil(Math.max(pointWidth, fileWidth)));
