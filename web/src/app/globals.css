@@ -102,13 +102,35 @@ button {
   position: relative;
 }
 
+.map-error {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 2;
+  max-width: min(560px, calc(100vw - 24px));
+  max-height: 30vh;
+  overflow: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--panel-text);
+  font: 500 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+  white-space: pre-wrap;
+}
+
+.map-error p {
+  margin: 4px 0;
+}
+
 .trajectory-card {
   position: absolute;
   top: 12px;
   left: 12px;
   z-index: 1;
   max-width: calc(100vw - 24px);
-  overflow: hidden;
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   background: var(--trajectory-panel);

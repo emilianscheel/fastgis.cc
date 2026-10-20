@@ -8,7 +8,7 @@ const outputDir = join(projectRoot, "public", "maplibre");
 
 await mkdir(outputDir, { recursive: true });
 await Promise.all(
-  ["maplibre-gl-worker.mjs", "maplibre-gl-shared.mjs"].map((file) =>
+  ["maplibre-gl-worker.mjs", "maplibre-gl-shared.mjs", "maplibre-gl-worker.mjs.map", "maplibre-gl-shared.mjs.map"].map((file) =>
     copyFile(join(sourceDir, file), join(outputDir, file)),
   ),
 );

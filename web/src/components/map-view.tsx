@@ -12,7 +12,7 @@ import type { FeatureCollection, LineString, Point } from "geojson";
 
 import { addGnssNoise } from "@/gnss-noise-model/inference.js";
 import { parseLinkIds, resolveOsmWays } from "@/lib/link-route";
-import { readSessionState, writeSessionState, type LinkRoute, type RouteItem } from "@/lib/session-state";
+import { readSessionState, writeSessionState, type LinkRoute, type RouteItem, type SessionState } from "@/lib/session-state";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
   nextTrajectoryColor,
@@ -56,7 +56,11 @@ export function MapView() {
   const measurementEnabledRef = useRef(false);
   const measurementPointsRef = useRef<Coordinate[]>([]);
   const cameraRef = useRef({ center: [8.6821, 50.1109] as [number, number], zoom: 3.1 });
-  const restoredSessionRef = useRef(false);
+  const restorationRef = useRef<Promise<SessionState | null> | null>(null);
+  const storageReadyRef = useRef(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [measurementEnabled, setMeasurementEnabled] = useState(false);
   const [measurementPoints, setMeasurementPoints] = useState<Coordinate[]>([]);
@@ -80,17 +84,32 @@ export function MapView() {
   );
 
   useEffect(() => {
-    const animationFrame = window.requestAnimationFrame(() => {
-      if (!restoredSessionRef.current) {
-        const stored = readSessionState();
+    let cancelled = false;
+    restorationRef.current ??= readSessionState();
+    void restorationRef.current
+      .then((stored) => {
+        if (cancelled) return;
+        storageReadyRef.current = true;
         if (stored) {
           routesRef.current = stored.routes;
-          setRoutes(stored.routes);
+          setRoutes((current) => [...stored.routes, ...current]);
           if (stored.camera) cameraRef.current = stored.camera;
         }
-        restoredSessionRef.current = true;
-      }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.error("Could not restore the trajectory session", error);
+        setStorageError("Could not restore saved routes. Changes in this tab will not be saved. Download important routes before leaving.");
+      })
+      .finally(() => {
+        if (!cancelled) setSessionReady(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
+  useEffect(() => {
+    if (!sessionReady) return;
+    const animationFrame = window.requestAnimationFrame(() => {
       if (!containerRef.current) return;
       maplibregl.setWorkerUrl(WORKER_URL);
       const map = new maplibregl.Map({
@@ -119,7 +138,11 @@ export function MapView() {
       map.on("moveend", () => {
         const center = map.getCenter();
         cameraRef.current = { center: [center.lng, center.lat], zoom: map.getZoom() };
-        persist(map, routesRef.current);
+        if (!storageReadyRef.current) return;
+        void writeSessionState({ camera: cameraRef.current }).catch((error: unknown) => {
+          console.error("Could not save the map camera", error);
+          setStorageError("Browser storage is full or unavailable. Routes remain usable, but recent changes may be lost on reload. Download important routes before leaving.");
+        });
       });
       map.on("click", (event) => {
         if (!measurementEnabledRef.current) {
@@ -177,15 +200,24 @@ export function MapView() {
       mapRef.current?.remove();
       mapRef.current = null;
     };
-  }, [styleUrl, trajectoryPointColor]);
+  }, [sessionReady, styleUrl, trajectoryPointColor]);
 
   useEffect(() => {
     routesRef.current = routes;
     const map = mapRef.current;
     if (!map?.isStyleLoaded()) return;
     syncRoutes(map, routes, trajectoryPointColor);
-    persist(map, routes);
   }, [routes, trajectoryPointColor]);
+
+  useEffect(() => {
+    if (!sessionReady || !storageReadyRef.current) return;
+    void writeSessionState({ routes, camera: cameraRef.current }).then(() => {
+      setStorageError(null);
+    }).catch((error: unknown) => {
+      console.error("Could not save trajectory routes", error);
+      setStorageError("Browser storage is full or unavailable. Routes remain usable, but recent changes may be lost on reload. Download important routes before leaving.");
+    });
+  }, [routes, sessionReady]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -228,26 +260,35 @@ export function MapView() {
   }, [selectedPoint]);
 
   async function importFiles(files: File[]) {
-    const imported = await Promise.all(files.map(async (file): Promise<RouteItem | null> => {
-      const csv = await file.text();
-      const linkIds = parseLinkIds(csv);
-      if (linkIds) {
-        const ways = await resolveOsmWays(linkIds);
-        return { kind: "links" as const, id: crypto.randomUUID(), name: file.name, linkIds, ways, visible: true, csv };
+    const validImports: RouteItem[] = [];
+    const errors: string[] = [];
+    for (const file of files) {
+      try {
+        const csv = await file.text();
+        const linkIds = parseLinkIds(csv);
+        if (linkIds) {
+          const ways = await resolveOsmWays(linkIds);
+          validImports.push({ kind: "links", id: crypto.randomUUID(), name: file.name, linkIds, ways, visible: true, csv });
+          continue;
+        }
+        const points = parseTrajectory(csv);
+        if (!points) throw new Error("No valid trajectory coordinates or link IDs found.");
+        validImports.push({
+          kind: "trajectory",
+          id: crypto.randomUUID(),
+          name: file.name,
+          points,
+          visible: true,
+          color: "",
+          colorMode: "solid",
+          csv,
+        });
+      } catch (error) {
+        console.error(`Could not import ${file.name}`, error);
+        errors.push(`${file.name}: ${error instanceof Error ? error.message : "Could not read this file."}`);
       }
-      const points = parseTrajectory(csv);
-      return points ? {
-        kind: "trajectory" as const,
-        id: crypto.randomUUID(),
-        name: file.name,
-        points,
-        visible: true,
-        color: "",
-        colorMode: "solid" as const,
-        csv,
-      } : null;
-    }));
-    const validImports = imported.filter((route): route is RouteItem => route !== null);
+    }
+    setImportError(errors.length ? errors.join("\n") : null);
     if (validImports.length === 0) return;
     setRoutes((current) => {
       let trajectoryIndex = current.filter((route) => route.kind === "trajectory").length;
@@ -369,6 +410,12 @@ export function MapView() {
       }}
     >
       <div className="map" ref={containerRef} />
+      {(storageError || importError) && (
+        <aside className="map-error" role="alert">
+          {storageError && <p>{storageError}</p>}
+          {importError && <p>{importError}</p>}
+        </aside>
+      )}
       <Button
         aria-label="Measure distance"
         aria-pressed={measurementEnabled}
@@ -567,11 +614,6 @@ export function MapView() {
   );
 }
 
-function persist(map: maplibregl.Map, routes: RouteItem[]) {
-  const center = map.getCenter();
-  writeSessionState({ routes, camera: { center: [center.lng, center.lat], zoom: map.getZoom() } });
-}
-
 function syncRoutes(map: maplibregl.Map, routes: RouteItem[], pointColor: string) {
   const lines: FeatureCollection<LineString, { color: string }> = {
     type: "FeatureCollection",
@@ -637,6 +679,7 @@ function syncRoutes(map: maplibregl.Map, routes: RouteItem[], pointColor: string
       id: TRAJECTORY_LINE_LAYER,
       type: "line",
       source: TRAJECTORY_SOURCE,
+      filter: ["==", ["geometry-type"], "LineString"],
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.9 },
     });
